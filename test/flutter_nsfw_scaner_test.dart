@@ -536,24 +536,33 @@ void main() {
     final plugin = FlutterNsfwScaner();
 
     final progress = <double>[];
+    final chunkProcessed = <int>[];
     final result = await plugin.scanMediaInChunks(
       media: const [
-        NsfwMediaInput.image('/tmp/a.jpg'),
-        NsfwMediaInput.image('/tmp/b.jpg'),
-        NsfwMediaInput.video('/tmp/c.mp4'),
+        NsfwMediaInput.image('/tmp/1.jpg'),
+        NsfwMediaInput.image('/tmp/2.jpg'),
+        NsfwMediaInput.image('/tmp/3.jpg'),
+        NsfwMediaInput.image('/tmp/4.jpg'),
+        NsfwMediaInput.image('/tmp/5.jpg'),
+        NsfwMediaInput.image('/tmp/6.jpg'),
+        NsfwMediaInput.image('/tmp/7.jpg'),
+        NsfwMediaInput.image('/tmp/8.jpg'),
+        NsfwMediaInput.video('/tmp/9.mp4'),
       ],
       chunkSize: 2,
       settings: const NsfwMediaBatchSettings(maxConcurrency: 2),
       onProgress: (event) => progress.add(event.percent),
+      onChunkResult: (chunk) => chunkProcessed.add(chunk.processed),
     );
 
-    expect(result.processed, 3);
-    expect(result.successCount, 3);
+    expect(result.processed, 9);
+    expect(result.successCount, 9);
     expect(result.errorCount, 0);
-    expect(result.flaggedCount, 3);
-    expect(result.items, hasLength(3));
+    expect(result.flaggedCount, 9);
+    expect(result.items, hasLength(9));
     expect(progress, isNotEmpty);
     expect(progress.last, 1.0);
+    expect(chunkProcessed, [8, 1]);
 
     await fakePlatform.close();
   });
@@ -579,6 +588,7 @@ void main() {
     FlutterNsfwScanerPlatform.instance = fakePlatform;
     final plugin = FlutterNsfwScaner();
 
+    final chunkProcessed = <int>[];
     final result = await plugin.scanMultipleMedia(
       pickIfEmpty: false,
       assetRefs: const [
@@ -601,6 +611,7 @@ void main() {
           modifiedDateSecond: 1,
         ),
       ],
+      onChunkResult: (chunk) => chunkProcessed.add(chunk.processed),
     );
 
     expect(result.processed, 2);
@@ -610,6 +621,7 @@ void main() {
       result.items.where((item) => item.hasError).single.error,
       contains('Asset-Auflosung fehlgeschlagen'),
     );
+    expect(chunkProcessed, [1]);
 
     await fakePlatform.close();
   });

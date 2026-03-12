@@ -351,6 +351,7 @@ class FlutterNsfwScaner {
     int chunkSize = 80,
     bool includeCleanResults = true,
     void Function(NsfwMediaBatchProgress progress)? onProgress,
+    void Function(NsfwMediaBatchResult chunkResult)? onChunkResult,
   }) async {
     if (media.isEmpty) {
       return const NsfwMediaBatchResult(
@@ -401,6 +402,7 @@ class FlutterNsfwScaner {
                 );
               },
       );
+      onChunkResult?.call(chunkResult);
 
       processed += chunkResult.processed;
       successCount += chunkResult.successCount;
@@ -1275,6 +1277,7 @@ class FlutterNsfwScaner {
     int resolveConcurrency = 4,
     bool includeOriginFileFallback = false,
     void Function(NsfwMediaBatchProgress progress)? onProgress,
+    void Function(NsfwMediaBatchResult chunkResult)? onChunkResult,
   }) async {
     final normalizedImagePaths = imagePaths
         .map((path) => path.trim())
@@ -1342,6 +1345,7 @@ class FlutterNsfwScaner {
       chunkSize: chunkSize,
       includeCleanResults: includeCleanResults,
       onProgress: onProgress,
+      onChunkResult: onChunkResult,
     );
     if (preflightErrors.isEmpty) {
       return scanned;

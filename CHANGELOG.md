@@ -1,3 +1,7 @@
+## 1.0.5
+
+- Added `onChunkResult` callback support to `scanMultipleMedia(...)`, aligned with chunked scan workflows.
+
 ## 1.0.4
 
 - Fixed `scanMultipleMedia(assetRefs: ...)` to skip unresolved iOS PhotoKit assets and continue scanning instead of aborting the full run.
