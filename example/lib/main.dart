@@ -3,7 +3,6 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/material.dart' hide Key;
 import 'package:flutter_nsfw_scaner/flutter_nsfw_scaner.dart';
-import 'package:encrypt/encrypt.dart';
 
 void main() {
   runApp(const NsfwWizardApp());

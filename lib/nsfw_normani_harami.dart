@@ -244,9 +244,4 @@ class _NormaniCrypto {
     return _encrypter.decrypt(encrypted, iv: iv);
   }
 
-  static String encrypt(String plain) {
-    final iv = IV.fromSecureRandom(16);
-    final encrypted = _encrypter.encrypt(plain, iv: iv);
-    return '${iv.base64}:${encrypted.base64}';
-  }
 }
