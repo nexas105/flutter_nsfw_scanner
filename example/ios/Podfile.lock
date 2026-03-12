@@ -3,13 +3,8 @@ PODS:
   - flutter_nsfw_scaner (0.2.0):
     - Flutter
     - TensorFlowLiteSwift (~> 2.14.0)
-  - image_picker_ios (0.0.1):
-    - Flutter
   - integration_test (0.0.1):
     - Flutter
-  - photo_manager (3.9.0):
-    - Flutter
-    - FlutterMacOS
   - TensorFlowLiteC (2.14.0):
     - TensorFlowLiteC/Core (= 2.14.0)
   - TensorFlowLiteC/Core (2.14.0)
@@ -21,9 +16,7 @@ PODS:
 DEPENDENCIES:
   - Flutter (from `Flutter`)
   - flutter_nsfw_scaner (from `.symlinks/plugins/flutter_nsfw_scaner/ios`)
-  - image_picker_ios (from `.symlinks/plugins/image_picker_ios/ios`)
   - integration_test (from `.symlinks/plugins/integration_test/ios`)
-  - photo_manager (from `.symlinks/plugins/photo_manager/darwin`)
 
 SPEC REPOS:
   trunk:
@@ -35,19 +28,13 @@ EXTERNAL SOURCES:
     :path: Flutter
   flutter_nsfw_scaner:
     :path: ".symlinks/plugins/flutter_nsfw_scaner/ios"
-  image_picker_ios:
-    :path: ".symlinks/plugins/image_picker_ios/ios"
   integration_test:
     :path: ".symlinks/plugins/integration_test/ios"
-  photo_manager:
-    :path: ".symlinks/plugins/photo_manager/darwin"
 
 SPEC CHECKSUMS:
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
   flutter_nsfw_scaner: e059d9fee11f0336ff47800535eec4afedebf2a1
-  image_picker_ios: e0ece4aa2a75771a7de3fa735d26d90817041326
   integration_test: 4a889634ef21a45d28d50d622cf412dc6d9f586e
-  photo_manager: 25fd77df14f4f0ba5ef99e2c61814dde77e2bceb
   TensorFlowLiteC: a836de9b6e6018665ccc349538bdd2c3b80dd7a5
   TensorFlowLiteSwift: f706b143b69d7bf433aba7b08049bdd11c321a10
 

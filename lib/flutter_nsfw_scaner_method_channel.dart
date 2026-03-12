@@ -192,6 +192,56 @@ class MethodChannelFlutterNsfwScaner extends FlutterNsfwScanerPlatform {
   }
 
   @override
+  Future<bool> checkMediaPermission() async {
+    final result = await methodChannel.invokeMethod<dynamic>(
+      'checkMediaPermission',
+    );
+    return result == true;
+  }
+
+  @override
+  Future<bool> requestMediaPermission() async {
+    final result = await methodChannel.invokeMethod<dynamic>(
+      'requestMediaPermission',
+    );
+    return result == true;
+  }
+
+  @override
+  Future<Map<String, dynamic>?> resolveMediaAsset({
+    required String assetId,
+    required bool includeOriginFileFallback,
+  }) async {
+    final result = await methodChannel.invokeMethod<dynamic>(
+      'resolveMediaAsset',
+      {
+        'assetId': assetId,
+        'includeOriginFileFallback': includeOriginFileFallback,
+      },
+    );
+    if (result == null) {
+      return null;
+    }
+    return _asStringDynamicMap(result);
+  }
+
+  @override
+  Future<Map<String, dynamic>> listGalleryAssets({
+    required int start,
+    required int end,
+    required bool includeImages,
+    required bool includeVideos,
+  }) async {
+    final result = await methodChannel.invokeMethod<dynamic>('listGalleryAssets', {
+      'start': start,
+      'end': end,
+      'includeImages': includeImages,
+      'includeVideos': includeVideos,
+    });
+    return _asStringDynamicMap(result);
+  }
+
+  @override
   Future<void> disposeScanner() async {
     await methodChannel.invokeMethod<void>('disposeScanner');
   }

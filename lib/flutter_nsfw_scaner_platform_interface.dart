@@ -108,6 +108,32 @@ abstract class FlutterNsfwScanerPlatform extends PlatformInterface {
     throw UnimplementedError('pickMedia() has not been implemented.');
   }
 
+  Future<bool> checkMediaPermission() {
+    throw UnimplementedError('checkMediaPermission() has not been implemented.');
+  }
+
+  Future<bool> requestMediaPermission() {
+    throw UnimplementedError(
+      'requestMediaPermission() has not been implemented.',
+    );
+  }
+
+  Future<Map<String, dynamic>?> resolveMediaAsset({
+    required String assetId,
+    required bool includeOriginFileFallback,
+  }) {
+    throw UnimplementedError('resolveMediaAsset() has not been implemented.');
+  }
+
+  Future<Map<String, dynamic>> listGalleryAssets({
+    required int start,
+    required int end,
+    required bool includeImages,
+    required bool includeVideos,
+  }) {
+    throw UnimplementedError('listGalleryAssets() has not been implemented.');
+  }
+
   Future<void> disposeScanner() {
     throw UnimplementedError('disposeScanner() has not been implemented.');
   }

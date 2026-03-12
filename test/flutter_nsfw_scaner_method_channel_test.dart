@@ -93,6 +93,37 @@ void main() {
               return '/tmp/thumb.jpg';
             case 'loadImageAsset':
               return '/tmp/asset.jpg';
+            case 'pickMedia':
+              return {
+                'imagePaths': ['/tmp/picked_image.jpg'],
+                'videoPaths': const <String>[],
+              };
+            case 'requestMediaPermission':
+              return true;
+            case 'checkMediaPermission':
+              return true;
+            case 'resolveMediaAsset':
+              return {
+                'id': 'image:1',
+                'type': 'image',
+                'path': '/tmp/resolved_image.jpg',
+              };
+            case 'listGalleryAssets':
+              return {
+                'items': [
+                  {
+                    'id': 'image:1',
+                    'type': 'image',
+                    'width': 100,
+                    'height': 100,
+                    'durationSeconds': 0,
+                    'createDateSecond': 1,
+                    'modifiedDateSecond': 1,
+                  },
+                ],
+                'totalAssets': 1,
+                'scannedAssets': 1,
+              };
             default:
               return null;
           }
@@ -197,5 +228,43 @@ void main() {
   test('loadImageAsset returns local full asset path', () async {
     final response = await platform.loadImageAsset(assetRef: 'ph://A-B-C');
     expect(response, '/tmp/asset.jpg');
+  });
+
+  test('pickMedia returns picked media payload', () async {
+    final response = await platform.pickMedia(
+      multiple: false,
+      allowImages: true,
+      allowVideos: false,
+    );
+    expect(response, isNotNull);
+    expect(response!['imagePaths'], ['/tmp/picked_image.jpg']);
+  });
+
+  test('requestMediaPermission returns granted state', () async {
+    expect(await platform.requestMediaPermission(), isTrue);
+  });
+
+  test('checkMediaPermission returns current granted state', () async {
+    expect(await platform.checkMediaPermission(), isTrue);
+  });
+
+  test('resolveMediaAsset returns resolved path payload', () async {
+    final response = await platform.resolveMediaAsset(
+      assetId: 'image:1',
+      includeOriginFileFallback: false,
+    );
+    expect(response, isNotNull);
+    expect(response!['path'], '/tmp/resolved_image.jpg');
+  });
+
+  test('listGalleryAssets returns gallery page payload', () async {
+    final response = await platform.listGalleryAssets(
+      start: 0,
+      end: 20,
+      includeImages: true,
+      includeVideos: true,
+    );
+    expect(response['totalAssets'], 1);
+    expect((response['items'] as List).length, 1);
   });
 }

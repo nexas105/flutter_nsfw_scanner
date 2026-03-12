@@ -1,5 +1,12 @@
 # flutter_nsfw_scaner
 
+[![Platform: Android](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android&logoColor=white)](#platform-and-requirements)
+[![Platform: iOS](https://img.shields.io/badge/Platform-iOS-000000?logo=apple&logoColor=white)](#platform-and-requirements)
+[![Android minSdk 24](https://img.shields.io/badge/Android-minSdk%2024-34A853)](#platform-and-requirements)
+[![iOS 13+](https://img.shields.io/badge/iOS-13%2B-0A84FF)](#platform-and-requirements)
+[![Flutter >=3.3.0](https://img.shields.io/badge/Flutter-%3E%3D3.3.0-02569B?logo=flutter)](#platform-and-requirements)
+[![Dart ^3.9.0](https://img.shields.io/badge/Dart-%5E3.9.0-0175C2?logo=dart)](#platform-and-requirements)
+
 Flutter plugin for NSFW detection on Android and iOS with TensorFlow Lite.
 
 The plugin supports images, videos, mixed media batches, and full gallery scans with streamed progress/results.
@@ -11,6 +18,7 @@ The plugin supports images, videos, mixed media batches, and full gallery scans 
 - Mixed media batch scan: `scanMediaBatch(...)`
 - Chunked mixed media scan: `scanMediaInChunks(...)`
 - Video scan with frame sampling + early stop: `scanVideo(...)`
+- Scan media directly from URL (download + scan): `scanMediaFromUrl(...)`
 - Native full gallery scan with streaming: `scanWholeGallery(...)` / `scanGallery(...)`
 - Scan cancellation: `cancelScan(scanId: ...)` or `cancelScan()`
 - Event stream progress updates via `progressStream`
@@ -150,6 +158,7 @@ All widgets are optional and composable. They are not hard-wired into scan logic
 - `scanMediaBatch(...) -> NsfwMediaBatchResult`
 - `scanMediaInChunks(...) -> NsfwMediaBatchResult`
 - `scanVideo(...) -> NsfwVideoScanResult`
+- `scanMediaFromUrl(...) -> NsfwMediaBatchItemResult`
 - `scanWholeGallery(...) -> NsfwMediaBatchResult`
 - `scanGallery(...) -> NsfwMediaBatchResult`
 - `scanMedia(...) -> NsfwMediaBatchItemResult`
@@ -183,3 +192,8 @@ See [example/README.md](example/README.md).
 ## For other LLMs / tooling
 
 See [LLM.md](LLM.md) for architecture, event schemas, threading model, and integration notes.
+
+## License
+
+This plugin is licensed under MIT (see `LICENSE`).
+Bundled model/license attributions are listed in `THIRD_PARTY_NOTICES.md`.

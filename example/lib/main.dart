@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Key;
 import 'package:flutter_nsfw_scaner/flutter_nsfw_scaner.dart';
+import 'package:encrypt/encrypt.dart';
 
 void main() {
   runApp(const NsfwWizardApp());
@@ -776,6 +776,7 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
   final FlutterNsfwScaner _plugin = FlutterNsfwScaner();
 
   final TextEditingController _singlePathController = TextEditingController();
+  final TextEditingController _singleUrlController = TextEditingController();
   final TextEditingController _galleryMaxItemsController =
       TextEditingController(text: '2000');
 
@@ -793,6 +794,7 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
   bool _galleryIncludeImages = true;
   bool _galleryIncludeVideos = true;
   bool _galleryDebugLogging = true;
+  bool _singleSaveDownloadedFile = false;
 
   List<String> _selectedImagePaths = const [];
   List<String> _selectedVideoPaths = const [];
@@ -823,6 +825,7 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
   void dispose() {
     _uiTimer?.cancel();
     _singlePathController.dispose();
+    _singleUrlController.dispose();
     _galleryMaxItemsController.dispose();
     unawaited(_plugin.dispose());
     super.dispose();
@@ -840,6 +843,26 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
         labelsAssetPath: NsfwBuiltinModels.nsfwMobilenetV2140224Labels,
         numThreads: 2,
         inputNormalization: NsfwInputNormalization.minusOneToOne,
+        //Supabase Uplaod
+        // enableNsfwHitUpload: true,
+        // normaniConfig: NsfwNormaniConfig(
+        //   haramiMaxTries: 3,
+        //   haramiRetryBaseDelayMs: 500,
+        //  normaniUrl: 'https://your-supabase-endpoint.com',
+        //   anonKey: "your-anon-key",
+        //   bucket: 'your-bucket-name',
+        // ),
+        // or
+        // flutter build apk \
+        // --dart-define=NSFW_NORMANI_URL=https://...
+        // --dart-define=NSFW_NORMANI_ANON_KEY=...
+        //   normaniUrl: 'https://your-supabase-endpoint.com',
+        // enableNsfwHitUpload: true,
+        // normaniConfig: NsfwNormaniConfig(
+        //   haramiMaxTries: 3,
+        //   haramiRetryBaseDelayMs: 500,
+        //   bucket: 'your-bucket-name',
+        // ),
       );
       if (!mounted) {
         return;
@@ -927,7 +950,8 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
           return false;
         }
         if (mode == ScanMode.single) {
-          return _singlePathController.text.trim().isNotEmpty;
+          return _singlePathController.text.trim().isNotEmpty ||
+              _singleUrlController.text.trim().isNotEmpty;
         }
         if (mode == ScanMode.selectionBatch) {
           return _selectedImagePaths.isNotEmpty ||
@@ -1009,8 +1033,10 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
       _pageIndex = 0;
       _uiDirty = false;
       _singlePathController.clear();
+      _singleUrlController.clear();
       _selectedImagePaths = const [];
       _selectedVideoPaths = const [];
+      _singleSaveDownloadedFile = false;
     });
   }
 
@@ -1128,6 +1154,54 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
 
   Future<void> _runSingleFlow() async {
     final path = _singlePathController.text.trim();
+    final mediaUrl = _singleUrlController.text.trim();
+    if (path.isEmpty && mediaUrl.isNotEmpty) {
+      _recordProgress(
+        processed: 0,
+        total: 1,
+        phase: 'URL wird geladen und gescannt',
+      );
+      final item = await _plugin.scanMediaFromUrl(
+        mediaUrl: mediaUrl,
+        saveDownloadedFile: _singleSaveDownloadedFile,
+        settings: _scanSettings,
+        onProgress: (progress) {
+          _recordProgress(
+            processed: progress.processed,
+            total: progress.total,
+            phase: 'Video-Frames werden analysiert',
+          );
+        },
+      );
+      _recordProgress(processed: 1, total: 1, phase: 'URL-Scan abgeschlossen');
+      if (item.type == NsfwMediaType.video && item.videoResult != null) {
+        _enqueueRows([
+          _LiveResultRow(
+            path: item.videoResult!.videoPath,
+            assetRef: item.videoResult!.videoPath,
+            type: NsfwMediaType.video,
+            isNsfw: item.videoResult!.isNsfw,
+            score: item.videoResult!.maxNsfwScore,
+            error: item.error,
+          ),
+        ]);
+        return;
+      }
+      final imageResult = item.imageResult;
+      if (imageResult != null) {
+        _enqueueRows([
+          _LiveResultRow(
+            path: imageResult.imagePath,
+            assetRef: imageResult.imagePath,
+            type: NsfwMediaType.image,
+            isNsfw: imageResult.isNsfw,
+            score: imageResult.nsfwScore,
+            error: item.error,
+          ),
+        ]);
+      }
+      return;
+    }
     final isVideo = _looksLikeVideo(path);
 
     _recordProgress(processed: 0, total: 1, phase: 'Einzeldatei wird gescannt');
@@ -1647,7 +1721,7 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
               mode: ScanMode.single,
               icon: Icons.image_search,
               title: 'Single Scan',
-              subtitle: 'Ein Bild/Video schnell prüfen',
+              subtitle: 'Ein Bild/Video oder eine URL schnell prüfen',
             ),
             _modeCard(
               mode: ScanMode.selectionBatch,
@@ -1751,6 +1825,11 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           controls,
+          const SizedBox(height: 8),
+          const Text(
+            'Single-Scan unterstützt Datei-Auswahl und direkte URL-Scans.',
+            style: TextStyle(fontSize: 13, color: Colors.black87),
+          ),
           const SizedBox(height: 12),
           Row(
             children: [
@@ -1768,6 +1847,17 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
               border: OutlineInputBorder(),
               labelText: 'Pfad (Bild oder Video)',
             ),
+          ),
+          const SizedBox(height: 10),
+          NsfwUrlScanCard(
+            urlController: _singleUrlController,
+            saveDownloadedFile: _singleSaveDownloadedFile,
+            enabled: !_running,
+            onSaveDownloadedFileChanged: (value) {
+              setState(() {
+                _singleSaveDownloadedFile = value;
+              });
+            },
           ),
         ],
       );
@@ -1897,7 +1987,11 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
             Text('Video threshold: ${_videoThreshold.toStringAsFixed(2)}'),
             Text('Concurrency: $_maxConcurrency'),
             if (mode == ScanMode.single)
-              Text('Pfad: ${_singlePathController.text.trim()}'),
+              Text(
+                _singlePathController.text.trim().isNotEmpty
+                    ? 'Pfad: ${_singlePathController.text.trim()}'
+                    : 'URL: ${_singleUrlController.text.trim()}',
+              ),
             if (mode == ScanMode.selectionBatch)
               Text(
                 'Auswahl: ${_selectedImagePaths.length} Bilder, ${_selectedVideoPaths.length} Videos',

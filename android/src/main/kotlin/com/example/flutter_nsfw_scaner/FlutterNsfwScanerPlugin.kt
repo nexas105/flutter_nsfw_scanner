@@ -75,6 +75,7 @@ class FlutterNsfwScanerPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
     private var pendingPickerAllowImages: Boolean = true
     private var pendingPickerAllowVideos: Boolean = true
     private var pendingPickerMultiple: Boolean = false
+    private var pendingPermissionOnly: Boolean = false
 
     private val mediaPickerRequestCode = 9331
     private val mediaPermissionRequestCode = 9332
@@ -106,6 +107,10 @@ class FlutterNsfwScanerPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
             "loadImageThumbnail" -> loadImageThumbnail(call, result)
             "loadImageAsset" -> loadImageAsset(call, result)
             "pickMedia" -> pickMedia(call, result)
+            "checkMediaPermission" -> checkMediaPermission(result)
+            "requestMediaPermission" -> requestMediaPermission(result)
+            "resolveMediaAsset" -> resolveMediaAsset(call, result)
+            "listGalleryAssets" -> listGalleryAssets(call, result)
             "cancelScan" -> cancelScan(call, result)
             "disposeScanner" -> disposeScanner(result)
             else -> dispatchNotImplemented(result)
@@ -463,7 +468,452 @@ class FlutterNsfwScanerPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
         }
     }
 
+    private fun pickMedia(call: MethodCall, result: Result) {
+        val args = call.arguments as? Map<*, *>
+        val allowImages = (args?.get("allowImages") as? Boolean) ?: true
+        val allowVideos = (args?.get("allowVideos") as? Boolean) ?: true
+        val multiple = (args?.get("multiple") as? Boolean) ?: false
+
+        if (!allowImages && !allowVideos) {
+            dispatchSuccess(
+                result,
+                linkedMapOf(
+                    "imagePaths" to emptyList<String>(),
+                    "videoPaths" to emptyList<String>(),
+                ),
+            )
+            return
+        }
+
+        val currentActivity = activity
+        if (currentActivity == null) {
+            dispatchError(result, "PICKER_UNAVAILABLE", "No foreground activity available for media picker", null)
+            return
+        }
+
+        synchronized(pickerLock) {
+            if (pendingPickerResult != null || pendingPermissionResult != null) {
+                dispatchError(result, "PICKER_BUSY", "A picker operation is already in progress", null)
+                return
+            }
+            pendingPickerAllowImages = allowImages
+            pendingPickerAllowVideos = allowVideos
+            pendingPickerMultiple = multiple
+        }
+
+        if (hasMediaPermissions()) {
+            synchronized(pickerLock) {
+                pendingPickerResult = result
+            }
+            launchMediaPicker()
+            return
+        }
+
+        val requestedPermissions = requiredMediaPermissions()
+        synchronized(pickerLock) {
+            pendingPermissionResult = result
+            pendingPermissionOnly = false
+        }
+        ActivityCompat.requestPermissions(
+            currentActivity,
+            requestedPermissions,
+            mediaPermissionRequestCode,
+        )
+    }
+
+    private fun requestMediaPermission(result: Result) {
+        if (hasMediaPermissions()) {
+            dispatchSuccess(result, true)
+            return
+        }
+        val currentActivity = activity
+        if (currentActivity == null) {
+            dispatchError(result, "PICKER_UNAVAILABLE", "No foreground activity available for permission request", null)
+            return
+        }
+        synchronized(pickerLock) {
+            if (pendingPermissionResult != null || pendingPickerResult != null) {
+                dispatchError(result, "PICKER_BUSY", "Another picker/permission operation is already in progress", null)
+                return
+            }
+            pendingPermissionResult = result
+            pendingPermissionOnly = true
+        }
+        ActivityCompat.requestPermissions(
+            currentActivity,
+            requiredMediaPermissions(),
+            mediaPermissionRequestCode,
+        )
+    }
+
+    private fun checkMediaPermission(result: Result) {
+        dispatchSuccess(result, hasMediaPermissions())
+    }
+
+    private fun resolveMediaAsset(call: MethodCall, result: Result) {
+        backgroundExecutor.execute {
+            try {
+                val args = requireArgs(call)
+                val assetId = args["assetId"]?.toString()?.trim().orEmpty()
+                if (assetId.isEmpty()) {
+                    throw IllegalArgumentException("assetId is required")
+                }
+                val (type, uri) = resolveAssetIdToUri(assetId)
+                val path = resolvePickerUriPath(uri)
+                    ?: throw IllegalArgumentException("Unable to resolve asset path for $assetId")
+                dispatchSuccess(
+                    result,
+                    linkedMapOf(
+                        "id" to assetId,
+                        "type" to type,
+                        "path" to path,
+                    ),
+                )
+            } catch (error: Exception) {
+                dispatchError(result, "RESOLVE_ASSET_FAILED", error.message ?: "Failed to resolve asset", error)
+            }
+        }
+    }
+
+    private fun listGalleryAssets(call: MethodCall, result: Result) {
+        backgroundExecutor.execute {
+            try {
+                val args = requireArgs(call)
+                val start = (args["start"] as? Number)?.toInt()?.coerceAtLeast(0) ?: 0
+                val end = (args["end"] as? Number)?.toInt()?.coerceAtLeast(start + 1) ?: (start + 200)
+                val includeImages = (args["includeImages"] as? Boolean) ?: true
+                val includeVideos = (args["includeVideos"] as? Boolean) ?: true
+                if (!includeImages && !includeVideos) {
+                    dispatchSuccess(
+                        result,
+                        linkedMapOf(
+                            "items" to emptyList<Map<String, Any?>>(),
+                            "totalAssets" to 0,
+                            "scannedAssets" to 0,
+                        ),
+                    )
+                    return@execute
+                }
+
+                val selectedTypes = mutableListOf<Int>()
+                if (includeImages) {
+                    selectedTypes += MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE
+                }
+                if (includeVideos) {
+                    selectedTypes += MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
+                }
+                val selection = selectedTypes.joinToString(" OR ") { "${MediaStore.Files.FileColumns.MEDIA_TYPE}=?" }
+                val selectionArgs = selectedTypes.map(Int::toString).toTypedArray()
+                val projection = arrayOf(
+                    MediaStore.MediaColumns._ID,
+                    MediaStore.Files.FileColumns.MEDIA_TYPE,
+                    MediaStore.MediaColumns.WIDTH,
+                    MediaStore.MediaColumns.HEIGHT,
+                    MediaStore.Video.VideoColumns.DURATION,
+                    MediaStore.MediaColumns.DATE_ADDED,
+                    MediaStore.MediaColumns.DATE_MODIFIED,
+                )
+                val sortOrder = "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+                val queryUri = MediaStore.Files.getContentUri("external")
+                val items = mutableListOf<Map<String, Any?>>()
+                var totalAssets = 0
+                var scannedAssets = 0
+                context.contentResolver.query(
+                    queryUri,
+                    projection,
+                    selection,
+                    selectionArgs,
+                    sortOrder,
+                )?.use { cursor ->
+                    val idIndex = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                    val typeIndex = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
+                    val widthIndex = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.WIDTH)
+                    val heightIndex = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.HEIGHT)
+                    val durationIndex = cursor.getColumnIndexOrThrow(MediaStore.Video.VideoColumns.DURATION)
+                    val addedIndex = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)
+                    val modifiedIndex = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
+
+                    var index = 0
+                    while (cursor.moveToNext()) {
+                        totalAssets += 1
+                        if (index >= start && index < end) {
+                            val id = cursor.getLong(idIndex)
+                            val mediaTypeValue = cursor.getInt(typeIndex)
+                            val type = if (mediaTypeValue == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO) "video" else "image"
+                            val assetId = "$type:$id"
+                            val width = cursor.getInt(widthIndex)
+                            val height = cursor.getInt(heightIndex)
+                            val durationMs = if (durationIndex >= 0) cursor.getLong(durationIndex) else 0L
+                            val added = if (addedIndex >= 0) cursor.getLong(addedIndex) else 0L
+                            val modified = if (modifiedIndex >= 0) cursor.getLong(modifiedIndex) else 0L
+                            items += linkedMapOf(
+                                "id" to assetId,
+                                "type" to type,
+                                "width" to width.coerceAtLeast(0),
+                                "height" to height.coerceAtLeast(0),
+                                "durationSeconds" to (durationMs / 1000L).toInt().coerceAtLeast(0),
+                                "createDateSecond" to added.toInt().coerceAtLeast(0),
+                                "modifiedDateSecond" to modified.toInt().coerceAtLeast(0),
+                            )
+                            scannedAssets += 1
+                        }
+                        index += 1
+                    }
+                }
+                dispatchSuccess(
+                    result,
+                    linkedMapOf(
+                        "items" to items,
+                        "totalAssets" to totalAssets,
+                        "scannedAssets" to scannedAssets,
+                    ),
+                )
+            } catch (error: Exception) {
+                dispatchError(result, "LIST_GALLERY_ASSETS_FAILED", error.message ?: "Failed to list gallery assets", error)
+            }
+        }
+    }
+
+    private fun resolveAssetIdToUri(assetId: String): Pair<String, Uri> {
+        val normalized = assetId.trim()
+        val colonIndex = normalized.indexOf(':')
+        if (colonIndex <= 0 || colonIndex >= normalized.length - 1) {
+            throw IllegalArgumentException("Unsupported assetId format: $assetId")
+        }
+        val type = normalized.substring(0, colonIndex).lowercase(Locale.US)
+        val idValue = normalized.substring(colonIndex + 1).toLongOrNull()
+            ?: throw IllegalArgumentException("Invalid assetId: $assetId")
+        val uri = if (type == "video") {
+            ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, idValue)
+        } else {
+            ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, idValue)
+        }
+        return (if (type == "video") "video" else "image") to uri
+    }
+
+    private fun hasMediaPermissions(): Boolean {
+        val required = requiredMediaPermissions()
+        if (required.isEmpty()) {
+            return true
+        }
+        return required.all { permission ->
+            ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun requiredMediaPermissions(): Array<String> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+            )
+        } else {
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+    }
+
+    private fun launchMediaPicker() {
+        val currentActivity = activity ?: return
+        val pickerIntent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, pendingPickerMultiple)
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                when {
+                    pendingPickerAllowImages && pendingPickerAllowVideos -> arrayOf("image/*", "video/*")
+                    pendingPickerAllowImages -> arrayOf("image/*")
+                    else -> arrayOf("video/*")
+                },
+            )
+        }
+        currentActivity.startActivityForResult(pickerIntent, mediaPickerRequestCode)
+    }
+
+    private fun resolvePickerResultPaths(data: Intent?): Map<String, List<String>> {
+        val imagePaths = LinkedHashSet<String>()
+        val videoPaths = LinkedHashSet<String>()
+        val uris = mutableListOf<Uri>()
+
+        data?.data?.let { uris.add(it) }
+        val clipData = data?.clipData
+        if (clipData != null) {
+            for (index in 0 until clipData.itemCount) {
+                clipData.getItemAt(index)?.uri?.let { uris.add(it) }
+            }
+        }
+
+        for (uri in uris) {
+            val mimeType = context.contentResolver.getType(uri)?.lowercase(Locale.US).orEmpty()
+            val path = resolvePickerUriPath(uri)?.trim().orEmpty()
+            if (path.isEmpty()) {
+                continue
+            }
+            if (mimeType.startsWith("video/")) {
+                if (pendingPickerAllowVideos) {
+                    videoPaths.add(path)
+                }
+                continue
+            }
+            if (mimeType.startsWith("image/")) {
+                if (pendingPickerAllowImages) {
+                    imagePaths.add(path)
+                }
+                continue
+            }
+            val inferredType = inferMediaTypeFromPath(path)
+            if (inferredType == "video" && pendingPickerAllowVideos) {
+                videoPaths.add(path)
+            } else if (inferredType == "image" && pendingPickerAllowImages) {
+                imagePaths.add(path)
+            }
+        }
+
+        return linkedMapOf(
+            "images" to imagePaths.toList(),
+            "videos" to videoPaths.toList(),
+        )
+    }
+
+    private fun inferMediaTypeFromPath(path: String): String {
+        val dotIndex = path.lastIndexOf('.')
+        if (dotIndex <= 0 || dotIndex >= path.length - 1) {
+            return "image"
+        }
+        val extension = path.substring(dotIndex + 1).lowercase(Locale.US)
+        return if (extension in setOf("mp4", "mov", "m4v", "3gp", "mkv", "webm", "avi")) "video" else "image"
+    }
+
+    private fun resolvePickerUriPath(uri: Uri): String? {
+        if (uri.scheme.equals("file", ignoreCase = true)) {
+            return uri.path
+        }
+        return try {
+            val mimeType = context.contentResolver.getType(uri).orEmpty()
+            val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
+            val suffix = if (extension.isNullOrBlank()) ".tmp" else ".${extension.lowercase(Locale.US)}"
+            val directory = File(context.cacheDir, "picker_cache").apply { mkdirs() }
+            val tempFile = File.createTempFile("picker_", suffix, directory)
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                tempFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            } ?: return null
+            tempFile.path
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    override fun onAttachedToActivity(binding: ActivityPluginBinding) {
+        activityBinding = binding
+        activity = binding.activity
+        binding.addActivityResultListener(this)
+        binding.addRequestPermissionsResultListener(this)
+    }
+
+    override fun onDetachedFromActivityForConfigChanges() {
+        detachFromActivity()
+    }
+
+    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
+        onAttachedToActivity(binding)
+    }
+
+    override fun onDetachedFromActivity() {
+        detachFromActivity()
+    }
+
+    private fun detachFromActivity() {
+        activityBinding?.removeActivityResultListener(this)
+        activityBinding?.removeRequestPermissionsResultListener(this)
+        activityBinding = null
+        activity = null
+        synchronized(pickerLock) {
+            pendingPickerResult = null
+            pendingPermissionResult = null
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        if (requestCode != mediaPickerRequestCode) {
+            return false
+        }
+        val flutterResult: Result? = synchronized(pickerLock) {
+            pendingPickerResult.also { pendingPickerResult = null }
+        }
+        if (flutterResult == null) {
+            return true
+        }
+
+        if (resultCode != Activity.RESULT_OK) {
+            dispatchSuccess(flutterResult, null)
+            return true
+        }
+
+        val resolved = resolvePickerResultPaths(data)
+        val imagePaths = resolved["images"].orEmpty()
+        val videoPaths = resolved["videos"].orEmpty()
+        if (imagePaths.isEmpty() && videoPaths.isEmpty()) {
+            dispatchSuccess(flutterResult, null)
+            return true
+        }
+        dispatchSuccess(
+            flutterResult,
+            linkedMapOf(
+                "imagePaths" to imagePaths,
+                "videoPaths" to videoPaths,
+            ),
+        )
+        return true
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ): Boolean {
+        if (requestCode != mediaPermissionRequestCode) {
+            return false
+        }
+        val permissionResult: Result? = synchronized(pickerLock) {
+            pendingPermissionResult.also { pendingPermissionResult = null }
+        }
+        val permissionOnly = synchronized(pickerLock) { pendingPermissionOnly }
+        synchronized(pickerLock) {
+            pendingPermissionOnly = false
+        }
+        if (permissionResult == null) {
+            return true
+        }
+        val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+        if (permissionOnly) {
+            dispatchSuccess(permissionResult, granted)
+            if (!granted) {
+                synchronized(pickerLock) {
+                    pendingPickerResult = null
+                }
+            }
+            return true
+        }
+        if (!granted) {
+            dispatchError(
+                permissionResult,
+                "PERMISSION_DENIED",
+                "Media permission denied. Please grant photo/video access.",
+                null,
+            )
+            return true
+        }
+        synchronized(pickerLock) {
+            pendingPickerResult = permissionResult
+        }
+        launchMediaPicker()
+        return true
+    }
+
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        detachFromActivity()
         scanner?.close()
         scanner = null
         channel.setMethodCallHandler(null)

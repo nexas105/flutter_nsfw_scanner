@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_nsfw_scaner/flutter_nsfw_scaner.dart';
 import 'package:flutter_nsfw_scaner/flutter_nsfw_scaner_method_channel.dart';
@@ -50,6 +51,64 @@ class MockFlutterNsfwScanerPlatform
       'videoPaths': allowVideos && !multiple
           ? ['/tmp/picked_video.mp4']
           : const <String>[],
+    };
+  }
+
+  @override
+  Future<bool> checkMediaPermission() async => true;
+
+  @override
+  Future<bool> requestMediaPermission() async => true;
+
+  @override
+  Future<Map<String, dynamic>?> resolveMediaAsset({
+    required String assetId,
+    required bool includeOriginFileFallback,
+  }) async {
+    return {
+      'id': assetId,
+      'type': assetId.toLowerCase().contains('video') ? 'video' : 'image',
+      'path': '/tmp/resolved_${assetId.replaceAll(':', '_')}',
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> listGalleryAssets({
+    required int start,
+    required int end,
+    required bool includeImages,
+    required bool includeVideos,
+  }) async {
+    final items = <Map<String, dynamic>>[];
+    var index = 0;
+    if (includeImages) {
+      items.add({
+        'id': 'image:1',
+        'type': 'image',
+        'width': 100,
+        'height': 100,
+        'durationSeconds': 0,
+        'createDateSecond': 1,
+        'modifiedDateSecond': 1,
+      });
+      index += 1;
+    }
+    if (includeVideos) {
+      items.add({
+        'id': 'video:2',
+        'type': 'video',
+        'width': 1920,
+        'height': 1080,
+        'durationSeconds': 12,
+        'createDateSecond': 2,
+        'modifiedDateSecond': 2,
+      });
+      index += 1;
+    }
+    return {
+      'items': items.skip(start).take(end - start).toList(growable: false),
+      'totalAssets': index,
+      'scannedAssets': items.skip(start).take(end - start).length,
     };
   }
 
@@ -308,8 +367,6 @@ class MockFlutterNsfwScanerPlatform
 }
 
 void main() {
-  TestWidgetsFlutterBinding.ensureInitialized();
-
   final FlutterNsfwScanerPlatform initialPlatform =
       FlutterNsfwScanerPlatform.instance;
 
@@ -364,6 +421,68 @@ void main() {
     expect(result.sampledFrames, 10);
     expect(result.isNsfw, true);
     expect(result.frames, isNotEmpty);
+
+    await fakePlatform.close();
+  });
+
+  test('scanMediaFromUrl scans image and does not persist local file by default', () async {
+    final fakePlatform = MockFlutterNsfwScanerPlatform();
+    FlutterNsfwScanerPlatform.instance = fakePlatform;
+    final plugin = FlutterNsfwScaner();
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() async {
+      await server.close(force: true);
+    });
+    server.listen((request) async {
+      request.response.headers.contentType = ContentType('image', 'jpeg');
+      request.response.add(List<int>.filled(32, 7));
+      await request.response.close();
+    });
+    final url = 'http://${server.address.host}:${server.port}/image.jpg';
+
+    final result = await plugin.scanMediaFromUrl(mediaUrl: url);
+    expect(result.type, NsfwMediaType.image);
+    expect(result.path, url);
+    expect(result.imageResult, isNotNull);
+    expect(result.imageResult!.imagePath, url);
+
+    await fakePlatform.close();
+  });
+
+  test('scanMediaFromUrl scans image and persists file when requested', () async {
+    final fakePlatform = MockFlutterNsfwScanerPlatform();
+    FlutterNsfwScanerPlatform.instance = fakePlatform;
+    final plugin = FlutterNsfwScaner();
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() async {
+      await server.close(force: true);
+    });
+    server.listen((request) async {
+      request.response.headers.contentType = ContentType('image', 'jpeg');
+      request.response.add(List<int>.filled(64, 11));
+      await request.response.close();
+    });
+    final targetDir = await Directory.systemTemp.createTemp('nsfw_url_scan_test_');
+    addTearDown(() async {
+      if (await targetDir.exists()) {
+        await targetDir.delete(recursive: true);
+      }
+    });
+    final url = 'http://${server.address.host}:${server.port}/keep.jpg';
+
+    final result = await plugin.scanMediaFromUrl(
+      mediaUrl: url,
+      saveDownloadedFile: true,
+      saveDirectoryPath: targetDir.path,
+      fileName: 'saved_image.jpg',
+    );
+
+    expect(result.type, NsfwMediaType.image);
+    final savedPath = result.imageResult!.imagePath;
+    expect(savedPath.startsWith(targetDir.path), isTrue);
+    expect(await File(savedPath).exists(), isTrue);
 
     await fakePlatform.close();
   });

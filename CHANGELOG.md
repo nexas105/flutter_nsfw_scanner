@@ -2,6 +2,7 @@
 
 - Added full gallery scanning with streaming progress and chunk result events.
 - Added mixed media batch APIs (`scanMediaBatch`, `scanMediaInChunks`, `scanMultipleMedia`).
+- Added URL media scan API (`scanMediaFromUrl`) with optional file persistence.
 - Added on-demand image preview helpers (`loadImageThumbnail`, `loadImageAsset`).
 - Added cancellation support across scan flows via `cancelScan`.
 - Added optional UI widget kit for scan progress/results navigation.

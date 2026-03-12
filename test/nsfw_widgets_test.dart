@@ -59,6 +59,9 @@ void main() {
   });
 
   testWidgets('renders navigation and control widgets', (tester) async {
+    final urlController = TextEditingController(text: 'https://example.com/a.jpg');
+    addTearDown(urlController.dispose);
+
     await tester.pumpWidget(
       wrap(
         Column(
@@ -79,6 +82,11 @@ void main() {
               onForward: () {},
               onRestart: () {},
             ),
+            NsfwUrlScanCard(
+              urlController: urlController,
+              saveDownloadedFile: false,
+              onSaveDownloadedFileChanged: (_) {},
+            ),
           ],
         ),
       ),
@@ -87,5 +95,6 @@ void main() {
     expect(find.text('2. Vorbereitung'), findsOneWidget);
     expect(find.text('Seite 1 / 5'), findsOneWidget);
     expect(find.text('Weiter'), findsOneWidget);
+    expect(find.text('Oder per URL scannen'), findsOneWidget);
   });
 }

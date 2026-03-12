@@ -3,9 +3,11 @@ import Flutter
 import TensorFlowLite
 import ImageIO
 import Photos
+import PhotosUI
+import UniformTypeIdentifiers
 import UIKit
 
-public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
+public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, PHPickerViewControllerDelegate {
   private let registrar: FlutterPluginRegistrar
   private let workerQueue = DispatchQueue(label: "flutter_nsfw_scaner.worker", qos: .userInitiated, attributes: .concurrent)
   private let scannerLock = NSLock()
@@ -15,6 +17,10 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
   private var progressSink: FlutterEventSink?
   private var cancelGeneration = 0
   private var cancelledScanIds = Set<String>()
+  private var pendingPickerResult: FlutterResult?
+  private var pendingPickerAllowImages = true
+  private var pendingPickerAllowVideos = true
+  private var pendingPickerMultiple = false
 
   private init(registrar: FlutterPluginRegistrar) {
     self.registrar = registrar
@@ -63,6 +69,16 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
       loadImageThumbnail(call, result: result)
     case "loadImageAsset":
       loadImageAsset(call, result: result)
+    case "pickMedia":
+      pickMedia(call, result: result)
+    case "checkMediaPermission":
+      checkMediaPermission(result: result)
+    case "requestMediaPermission":
+      requestMediaPermission(result: result)
+    case "resolveMediaAsset":
+      resolveMediaAsset(call, result: result)
+    case "listGalleryAssets":
+      listGalleryAssets(call, result: result)
     case "cancelScan":
       cancelScan(call, result: result)
     case "disposeScanner":
@@ -419,6 +435,386 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
         self.dispatchError(result, code: "VIDEO_SCAN_FAILED", error: error)
       }
     }
+  }
+
+  private func pickMedia(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard #available(iOS 14, *) else {
+      dispatchError(
+        result,
+        code: "PICKER_UNAVAILABLE",
+        error: ScannerError.invalidArgument("Native media picker requires iOS 14 or newer")
+      )
+      return
+    }
+
+    guard let args = call.arguments as? [String: Any] else {
+      dispatchError(result, code: "PICKER_FAILED", error: ScannerError.invalidArgument("Expected map arguments"))
+      return
+    }
+
+    let allowImages = (args["allowImages"] as? Bool) ?? true
+    let allowVideos = (args["allowVideos"] as? Bool) ?? true
+    let multiple = (args["multiple"] as? Bool) ?? false
+
+    if !allowImages && !allowVideos {
+      dispatchResult(result, value: [
+        "imagePaths": [String](),
+        "videoPaths": [String](),
+      ])
+      return
+    }
+
+    DispatchQueue.main.async {
+      if self.pendingPickerResult != nil {
+        self.dispatchError(
+          result,
+          code: "PICKER_BUSY",
+          error: ScannerError.invalidArgument("A picker operation is already in progress")
+        )
+        return
+      }
+
+      guard let presentingViewController = self.topViewController() else {
+        self.dispatchError(
+          result,
+          code: "PICKER_UNAVAILABLE",
+          error: ScannerError.invalidArgument("No foreground view controller available")
+        )
+        return
+      }
+
+      self.pendingPickerAllowImages = allowImages
+      self.pendingPickerAllowVideos = allowVideos
+      self.pendingPickerMultiple = multiple
+      self.pendingPickerResult = result
+
+      var configuration = PHPickerConfiguration(photoLibrary: .shared())
+      configuration.selectionLimit = multiple ? 0 : 1
+      if allowImages && allowVideos {
+        configuration.filter = .any(of: [.images, .videos])
+      } else if allowImages {
+        configuration.filter = .images
+      } else {
+        configuration.filter = .videos
+      }
+
+      let picker = PHPickerViewController(configuration: configuration)
+      picker.delegate = self
+      presentingViewController.present(picker, animated: true)
+    }
+  }
+
+  private func requestMediaPermission(result: @escaping FlutterResult) {
+    if #available(iOS 14, *) {
+      let currentStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+      switch currentStatus {
+      case .authorized, .limited:
+        dispatchResult(result, value: true)
+      case .denied, .restricted:
+        dispatchResult(result, value: false)
+      case .notDetermined:
+        PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
+          let granted = status == .authorized || status == .limited
+          self.dispatchResult(result, value: granted)
+        }
+      @unknown default:
+        dispatchResult(result, value: false)
+      }
+      return
+    }
+
+    let status = PHPhotoLibrary.authorizationStatus()
+    switch status {
+    case .authorized:
+      dispatchResult(result, value: true)
+    case .denied, .restricted:
+      dispatchResult(result, value: false)
+    case .notDetermined:
+      PHPhotoLibrary.requestAuthorization { newStatus in
+        self.dispatchResult(result, value: newStatus == .authorized)
+      }
+    case .limited:
+      dispatchResult(result, value: true)
+    @unknown default:
+      dispatchResult(result, value: false)
+    }
+  }
+
+  private func checkMediaPermission(result: @escaping FlutterResult) {
+    if #available(iOS 14, *) {
+      let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+      let granted = status == .authorized || status == .limited
+      dispatchResult(result, value: granted)
+      return
+    }
+    let status = PHPhotoLibrary.authorizationStatus()
+    dispatchResult(result, value: status == .authorized)
+  }
+
+  private func resolveMediaAsset(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    workerQueue.async {
+      do {
+        guard let args = call.arguments as? [String: Any] else {
+          throw ScannerError.invalidArgument("Expected map arguments")
+        }
+        let assetId = (args["assetId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !assetId.isEmpty else {
+          throw ScannerError.invalidArgument("assetId is required")
+        }
+        let normalizedId = self.normalizeAssetIdentifier(assetId)
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [normalizedId], options: nil).firstObject else {
+          self.dispatchResult(result, value: nil)
+          return
+        }
+
+        let type: String
+        switch asset.mediaType {
+        case .video:
+          type = "video"
+        case .image:
+          type = "image"
+        default:
+          self.dispatchResult(result, value: nil)
+          return
+        }
+
+        let path = try self.resolveAssetFilePath(asset: asset, preferredType: type)
+        self.dispatchResult(result, value: [
+          "id": normalizedId,
+          "type": type,
+          "path": path,
+        ])
+      } catch {
+        self.dispatchError(result, code: "RESOLVE_ASSET_FAILED", error: error)
+      }
+    }
+  }
+
+  private func listGalleryAssets(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    workerQueue.async {
+      do {
+        guard let args = call.arguments as? [String: Any] else {
+          throw ScannerError.invalidArgument("Expected map arguments")
+        }
+        let start = max(0, (args["start"] as? NSNumber)?.intValue ?? 0)
+        let end = max(start + 1, (args["end"] as? NSNumber)?.intValue ?? (start + 200))
+        let includeImages = (args["includeImages"] as? Bool) ?? true
+        let includeVideos = (args["includeVideos"] as? Bool) ?? true
+        if !includeImages && !includeVideos {
+          self.dispatchResult(result, value: [
+            "items": [[String: Any]](),
+            "totalAssets": 0,
+            "scannedAssets": 0,
+          ])
+          return
+        }
+
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        let fetched = PHAsset.fetchAssets(with: options)
+        var items = [[String: Any]]()
+        var totalAssets = 0
+        var scannedAssets = 0
+        fetched.enumerateObjects { asset, index, _ in
+          let type: String
+          if asset.mediaType == .image {
+            if !includeImages { return }
+            type = "image"
+          } else if asset.mediaType == .video {
+            if !includeVideos { return }
+            type = "video"
+          } else {
+            return
+          }
+
+          totalAssets += 1
+          if totalAssets <= start || totalAssets > end {
+            return
+          }
+          scannedAssets += 1
+          let durationSeconds = Int(max(0, round(asset.duration)))
+          let created = Int(asset.creationDate?.timeIntervalSince1970 ?? 0)
+          let modified = Int(asset.modificationDate?.timeIntervalSince1970 ?? 0)
+          items.append([
+            "id": asset.localIdentifier,
+            "type": type,
+            "width": asset.pixelWidth,
+            "height": asset.pixelHeight,
+            "durationSeconds": durationSeconds,
+            "createDateSecond": created,
+            "modifiedDateSecond": modified,
+          ])
+        }
+
+        self.dispatchResult(result, value: [
+          "items": items,
+          "totalAssets": totalAssets,
+          "scannedAssets": scannedAssets,
+        ])
+      } catch {
+        self.dispatchError(result, code: "LIST_GALLERY_ASSETS_FAILED", error: error)
+      }
+    }
+  }
+
+  @available(iOS 14, *)
+  public func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+    picker.dismiss(animated: true)
+
+    guard let flutterResult = pendingPickerResult else {
+      return
+    }
+    pendingPickerResult = nil
+
+    if results.isEmpty {
+      dispatchResult(flutterResult, value: nil)
+      return
+    }
+
+    let imageType = UTType.image.identifier
+    let videoType = UTType.movie.identifier
+    let lock = NSLock()
+    let group = DispatchGroup()
+    var imagePaths = [String]()
+    var videoPaths = [String]()
+
+    for item in results {
+      let provider = item.itemProvider
+      if pendingPickerAllowVideos && provider.hasItemConformingToTypeIdentifier(videoType) {
+        group.enter()
+        provider.loadFileRepresentation(forTypeIdentifier: videoType) { url, _ in
+          defer { group.leave() }
+          guard let url, let copiedPath = self.copyPickedFileToCache(sourceURL: url, suffixHint: "mov") else {
+            return
+          }
+          lock.lock()
+          videoPaths.append(copiedPath)
+          lock.unlock()
+        }
+        continue
+      }
+
+      if pendingPickerAllowImages && provider.hasItemConformingToTypeIdentifier(imageType) {
+        group.enter()
+        provider.loadFileRepresentation(forTypeIdentifier: imageType) { url, _ in
+          defer { group.leave() }
+          guard let url, let copiedPath = self.copyPickedFileToCache(sourceURL: url, suffixHint: "jpg") else {
+            return
+          }
+          lock.lock()
+          imagePaths.append(copiedPath)
+          lock.unlock()
+        }
+      }
+    }
+
+    group.notify(queue: .main) {
+      let uniqueImages = Array(NSOrderedSet(array: imagePaths)) as? [String] ?? []
+      let uniqueVideos = Array(NSOrderedSet(array: videoPaths)) as? [String] ?? []
+      if uniqueImages.isEmpty && uniqueVideos.isEmpty {
+        self.dispatchResult(flutterResult, value: nil)
+        return
+      }
+      self.dispatchResult(flutterResult, value: [
+        "imagePaths": uniqueImages,
+        "videoPaths": uniqueVideos,
+      ])
+    }
+  }
+
+  private func copyPickedFileToCache(sourceURL: URL, suffixHint: String) -> String? {
+    do {
+      let pickerDir = FileManager.default.temporaryDirectory.appendingPathComponent("picker_cache", isDirectory: true)
+      try FileManager.default.createDirectory(at: pickerDir, withIntermediateDirectories: true)
+      let destinationURL = pickerDir
+        .appendingPathComponent("picked_\(UUID().uuidString)")
+        .appendingPathExtension(suffixHint)
+      if FileManager.default.fileExists(atPath: destinationURL.path) {
+        try FileManager.default.removeItem(at: destinationURL)
+      }
+      try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+      return destinationURL.path
+    } catch {
+      return nil
+    }
+  }
+
+  private func topViewController(base: UIViewController? = nil) -> UIViewController? {
+    let root: UIViewController?
+    if let base {
+      root = base
+    } else {
+      root = UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .flatMap { $0.windows }
+        .first(where: { $0.isKeyWindow })?
+        .rootViewController
+    }
+    if let navigation = root as? UINavigationController {
+      return topViewController(base: navigation.visibleViewController)
+    }
+    if let tab = root as? UITabBarController {
+      return topViewController(base: tab.selectedViewController)
+    }
+    if let presented = root?.presentedViewController {
+      return topViewController(base: presented)
+    }
+    return root
+  }
+
+  private func normalizeAssetIdentifier(_ rawId: String) -> String {
+    if rawId.hasPrefix("ph://") {
+      return String(rawId.dropFirst(5))
+    }
+    return rawId
+  }
+
+  private func resolveAssetFilePath(asset: PHAsset, preferredType: String) throws -> String {
+    if preferredType == "video" {
+      return try resolveVideoAssetPath(asset: asset)
+    }
+    return try resolveImageAssetPath(asset: asset)
+  }
+
+  private func resolveImageAssetPath(asset: PHAsset) throws -> String {
+    let options = PHImageRequestOptions()
+    options.isSynchronous = true
+    options.isNetworkAccessAllowed = true
+    options.version = .current
+    var resolvedData: Data?
+    PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
+      resolvedData = data
+    }
+    guard let data = resolvedData else {
+      throw ScannerError.invalidArgument("Unable to read image data for asset \(asset.localIdentifier)")
+    }
+    let outDir = FileManager.default.temporaryDirectory.appendingPathComponent("asset_cache", isDirectory: true)
+    try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+    let out = outDir.appendingPathComponent("asset_\(UUID().uuidString).jpg")
+    try data.write(to: out, options: .atomic)
+    return out.path
+  }
+
+  private func resolveVideoAssetPath(asset: PHAsset) throws -> String {
+    let resources = PHAssetResource.assetResources(for: asset)
+    guard let resource = resources.first(where: { $0.type == .video || $0.type == .fullSizeVideo }) ?? resources.first else {
+      throw ScannerError.invalidArgument("Unable to read video resource for asset \(asset.localIdentifier)")
+    }
+    let outDir = FileManager.default.temporaryDirectory.appendingPathComponent("asset_cache", isDirectory: true)
+    try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+    let ext = (resource.originalFilename as NSString).pathExtension
+    let out = outDir.appendingPathComponent("asset_\(UUID().uuidString).\(ext.isEmpty ? "mov" : ext)")
+    let semaphore = DispatchSemaphore(value: 0)
+    var writeError: Error?
+    PHAssetResourceManager.default().writeData(for: resource, toFile: out, options: nil) { error in
+      writeError = error
+      semaphore.signal()
+    }
+    semaphore.wait()
+    if let writeError {
+      throw writeError
+    }
+    return out.path
   }
 
   private func currentScanner() -> IOSNsfwScanner? {

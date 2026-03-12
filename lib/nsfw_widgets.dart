@@ -423,6 +423,67 @@ class NsfwResultTile extends StatelessWidget {
   }
 }
 
+class NsfwUrlScanCard extends StatelessWidget {
+  const NsfwUrlScanCard({
+    super.key,
+    required this.urlController,
+    required this.saveDownloadedFile,
+    required this.onSaveDownloadedFileChanged,
+    this.enabled = true,
+    this.hintText = 'https://example.com/image.jpg',
+    this.title = 'Oder per URL scannen',
+    this.subtitle = 'Lädt das Medium herunter und scannt es direkt.',
+  });
+
+  final TextEditingController urlController;
+  final bool saveDownloadedFile;
+  final ValueChanged<bool> onSaveDownloadedFileChanged;
+  final bool enabled;
+  final String hintText;
+  final String title;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            Text(subtitle),
+            const SizedBox(height: 10),
+            TextField(
+              controller: urlController,
+              enabled: enabled,
+              keyboardType: TextInputType.url,
+              decoration: InputDecoration(
+                border: const OutlineInputBorder(),
+                labelText: 'Media URL',
+                hintText: hintText,
+              ),
+            ),
+            const SizedBox(height: 8),
+            SwitchListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              value: saveDownloadedFile,
+              onChanged: enabled ? onSaveDownloadedFileChanged : null,
+              title: const Text('Download speichern'),
+              subtitle: Text(
+                saveDownloadedFile
+                    ? 'Datei bleibt lokal erhalten.'
+                    : 'Datei wird nach dem Scan gelöscht.',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 double _safeRatio({required int processed, required int total}) {
   if (total <= 0) {
     return 0.0;
