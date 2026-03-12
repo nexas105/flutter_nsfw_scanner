@@ -1,0 +1,1456 @@
+import 'dart:async';
+import 'dart:math' as math;
+
+import 'package:photo_manager/photo_manager.dart';
+
+import 'flutter_nsfw_scaner_platform_interface.dart';
+import 'nsfw_asset.dart';
+import 'nsfw_gallery_media.dart';
+import 'nsfw_input_normalization.dart';
+import 'nsfw_media_batch.dart';
+import 'nsfw_scan_progress.dart';
+import 'nsfw_scan_result.dart';
+import 'nsfw_video_scan_result.dart';
+
+export 'nsfw_builtin_models.dart';
+export 'nsfw_asset.dart';
+export 'nsfw_gallery_media.dart';
+export 'nsfw_input_normalization.dart';
+export 'nsfw_media_batch.dart';
+export 'nsfw_widgets.dart';
+export 'nsfw_scan_progress.dart';
+export 'nsfw_scan_result.dart';
+export 'nsfw_video_scan_result.dart';
+
+class FlutterNsfwScaner {
+  final FlutterNsfwScanerPlatform _platform;
+
+  int _scanCounter = 0;
+
+  FlutterNsfwScaner._({required FlutterNsfwScanerPlatform platform})
+    : _platform = platform;
+
+  factory FlutterNsfwScaner({FlutterNsfwScanerPlatform? platform}) {
+    return FlutterNsfwScaner._(platform: platform ?? FlutterNsfwScanerPlatform.instance);
+  }
+
+  Stream<NsfwScanProgress> get progressStream {
+    return _platform.progressStream.map(NsfwScanProgress.fromMap);
+  }
+
+  Future<String?> getPlatformVersion() {
+    return _platform.getPlatformVersion();
+  }
+
+  Future<void> initialize({
+    required String modelAssetPath,
+    String? labelsAssetPath,
+    int numThreads = 2,
+    NsfwInputNormalization inputNormalization =
+        NsfwInputNormalization.minusOneToOne,
+  }) async {
+    await _ensureGalleryPermissionGranted();
+    return _platform.initializeScanner(
+      modelAssetPath: modelAssetPath,
+      labelsAssetPath: labelsAssetPath,
+      numThreads: numThreads,
+      inputNormalization: inputNormalization.wireValue,
+    );
+  }
+
+  Future<NsfwScanResult> scanImage({
+    required String imagePath,
+    double threshold = 0.45,
+  }) async {
+    final map = await _platform.scanImage(
+      imagePath: imagePath,
+      threshold: threshold,
+    );
+    return NsfwScanResult.fromMap(map);
+  }
+
+  Future<List<NsfwScanResult>> scanBatch({
+    required List<String> imagePaths,
+    double threshold = 0.45,
+    int maxConcurrency = 2,
+    void Function(NsfwScanProgress progress)? onProgress,
+  }) async {
+    if (imagePaths.isEmpty) {
+      return const [];
+    }
+
+    final scanId =
+        'scan_${DateTime.now().microsecondsSinceEpoch}_${_scanCounter++}';
+    StreamSubscription<NsfwScanProgress>? subscription;
+    Completer<void>? completionSignal;
+
+    if (onProgress != null) {
+      completionSignal = Completer<void>();
+      subscription = progressStream
+          .where((progress) => progress.scanId == scanId)
+          .listen((progress) {
+            onProgress(progress);
+            if (progress.isCompleted && !completionSignal!.isCompleted) {
+              completionSignal.complete();
+            }
+          });
+    }
+
+    try {
+      final maps = await _platform.scanBatch(
+        scanId: scanId,
+        imagePaths: imagePaths,
+        threshold: threshold,
+        maxConcurrency: maxConcurrency,
+      );
+
+      if (completionSignal != null && !completionSignal.isCompleted) {
+        await completionSignal.future.timeout(
+          const Duration(milliseconds: 250),
+          onTimeout: () {},
+        );
+      }
+
+      return maps.map(NsfwScanResult.fromMap).toList(growable: false);
+    } finally {
+      await subscription?.cancel();
+    }
+  }
+
+  Future<NsfwVideoScanResult> scanVideo({
+    required String videoPath,
+    double threshold = 0.45,
+    double sampleRateFps = 0.3,
+    int maxFrames = 300,
+    bool dynamicSampleRate = true,
+    double shortVideoMinSampleRateFps = 0.5,
+    double shortVideoMaxSampleRateFps = 0.8,
+    int mediumVideoMinutesThreshold = 10,
+    int longVideoMinutesThreshold = 15,
+    double mediumVideoSampleRateFps = 0.3,
+    double longVideoSampleRateFps = 0.2,
+    bool videoEarlyStopEnabled = true,
+    int videoEarlyStopBaseNsfwFrames = 3,
+    int videoEarlyStopMediumBonusFrames = 1,
+    int videoEarlyStopLongBonusFrames = 2,
+    int videoEarlyStopVeryLongMinutesThreshold = 30,
+    int videoEarlyStopVeryLongBonusFrames = 3,
+    void Function(NsfwScanProgress progress)? onProgress,
+  }) async {
+    final scanId =
+        'video_${DateTime.now().microsecondsSinceEpoch}_${_scanCounter++}';
+    StreamSubscription<NsfwScanProgress>? subscription;
+    Completer<void>? completionSignal;
+
+    if (onProgress != null) {
+      completionSignal = Completer<void>();
+      subscription = progressStream
+          .where((progress) => progress.scanId == scanId)
+          .listen((progress) {
+            onProgress(progress);
+            if (progress.isCompleted && !completionSignal!.isCompleted) {
+              completionSignal.complete();
+            }
+          });
+    }
+
+    try {
+      final map = await _platform.scanVideo(
+        scanId: scanId,
+        videoPath: videoPath,
+        threshold: threshold,
+        sampleRateFps: sampleRateFps,
+        maxFrames: maxFrames,
+        dynamicSampleRate: dynamicSampleRate,
+        shortVideoMinSampleRateFps: shortVideoMinSampleRateFps,
+        shortVideoMaxSampleRateFps: shortVideoMaxSampleRateFps,
+        mediumVideoMinutesThreshold: mediumVideoMinutesThreshold,
+        longVideoMinutesThreshold: longVideoMinutesThreshold,
+        mediumVideoSampleRateFps: mediumVideoSampleRateFps,
+        longVideoSampleRateFps: longVideoSampleRateFps,
+        videoEarlyStopEnabled: videoEarlyStopEnabled,
+        videoEarlyStopBaseNsfwFrames: videoEarlyStopBaseNsfwFrames,
+        videoEarlyStopMediumBonusFrames: videoEarlyStopMediumBonusFrames,
+        videoEarlyStopLongBonusFrames: videoEarlyStopLongBonusFrames,
+        videoEarlyStopVeryLongMinutesThreshold:
+            videoEarlyStopVeryLongMinutesThreshold,
+        videoEarlyStopVeryLongBonusFrames: videoEarlyStopVeryLongBonusFrames,
+      );
+      if (completionSignal != null && !completionSignal.isCompleted) {
+        await completionSignal.future.timeout(
+          const Duration(milliseconds: 250),
+          onTimeout: () {},
+        );
+      }
+      return NsfwVideoScanResult.fromMap(map);
+    } finally {
+      await subscription?.cancel();
+    }
+  }
+
+  Future<NsfwMediaBatchResult> scanMediaBatch({
+    required List<NsfwMediaInput> media,
+    NsfwMediaBatchSettings settings = const NsfwMediaBatchSettings(),
+    void Function(NsfwMediaBatchProgress progress)? onProgress,
+  }) async {
+    if (media.isEmpty) {
+      return const NsfwMediaBatchResult(
+        items: [],
+        processed: 0,
+        successCount: 0,
+        errorCount: 0,
+        flaggedCount: 0,
+      );
+    }
+
+    final scanId =
+        'media_${DateTime.now().microsecondsSinceEpoch}_${_scanCounter++}';
+    StreamSubscription<NsfwScanProgress>? subscription;
+    Completer<void>? completionSignal;
+
+    if (onProgress != null) {
+      completionSignal = Completer<void>();
+      subscription = progressStream
+          .where((progress) => progress.scanId == scanId)
+          .listen((progress) {
+            if (progress.status == 'running') {
+              final rawType = _normalizeMediaType(progress.mediaType);
+              final resolvedType = rawType ?? NsfwMediaType.image;
+              onProgress(
+                NsfwMediaBatchProgress(
+                  processed: progress.processed,
+                  total: progress.total,
+                  percent: progress.percent,
+                  currentPath: progress.imagePath ?? '',
+                  currentType: resolvedType,
+                  error: progress.error,
+                ),
+              );
+            }
+            if (progress.isCompleted && !completionSignal!.isCompleted) {
+              completionSignal.complete();
+            }
+          });
+    }
+
+    try {
+      final payload = await _platform.scanMediaBatch(
+        scanId: scanId,
+        mediaItems: media
+            .map(
+              (item) => {
+                'path': item.path,
+                'type': item.type == NsfwMediaType.video ? 'video' : 'image',
+              },
+            )
+            .toList(growable: false),
+        settings: {
+          'imageThreshold': settings.imageThreshold,
+          'videoThreshold': settings.videoThreshold,
+          'videoSampleRateFps': settings.videoSampleRateFps,
+          'videoMaxFrames': settings.videoMaxFrames,
+          'dynamicVideoSampleRate': settings.dynamicVideoSampleRate,
+          'shortVideoMinSampleRateFps': settings.shortVideoMinSampleRateFps,
+          'shortVideoMaxSampleRateFps': settings.shortVideoMaxSampleRateFps,
+          'mediumVideoMinutesThreshold': settings.mediumVideoMinutesThreshold,
+          'longVideoMinutesThreshold': settings.longVideoMinutesThreshold,
+          'mediumVideoSampleRateFps': settings.mediumVideoSampleRateFps,
+          'longVideoSampleRateFps': settings.longVideoSampleRateFps,
+          'videoEarlyStopEnabled': settings.videoEarlyStopEnabled,
+          'videoEarlyStopBaseNsfwFrames': settings.videoEarlyStopBaseNsfwFrames,
+          'videoEarlyStopMediumBonusFrames':
+              settings.videoEarlyStopMediumBonusFrames,
+          'videoEarlyStopLongBonusFrames':
+              settings.videoEarlyStopLongBonusFrames,
+          'videoEarlyStopVeryLongMinutesThreshold':
+              settings.videoEarlyStopVeryLongMinutesThreshold,
+          'videoEarlyStopVeryLongBonusFrames':
+              settings.videoEarlyStopVeryLongBonusFrames,
+          'maxConcurrency': settings.maxConcurrency,
+          'continueOnError': settings.continueOnError,
+        },
+      );
+
+      if (completionSignal != null && !completionSignal.isCompleted) {
+        await completionSignal.future.timeout(
+          const Duration(milliseconds: 250),
+          onTimeout: () {},
+        );
+      }
+      return _parseMediaBatchResult(payload);
+    } finally {
+      await subscription?.cancel();
+    }
+  }
+
+  Future<NsfwMediaBatchResult> scanMediaInChunks({
+    required List<NsfwMediaInput> media,
+    NsfwMediaBatchSettings settings = const NsfwMediaBatchSettings(),
+    int chunkSize = 80,
+    bool includeCleanResults = true,
+    void Function(NsfwMediaBatchProgress progress)? onProgress,
+  }) async {
+    if (media.isEmpty) {
+      return const NsfwMediaBatchResult(
+        items: [],
+        processed: 0,
+        successCount: 0,
+        errorCount: 0,
+        flaggedCount: 0,
+      );
+    }
+
+    final safeChunkSize = chunkSize.clamp(8, 500);
+    final totalItems = media.length;
+    final chunkCount = (totalItems / safeChunkSize).ceil();
+
+    var processed = 0;
+    var successCount = 0;
+    var errorCount = 0;
+    var flaggedCount = 0;
+    final items = <NsfwMediaBatchItemResult>[];
+
+    for (var chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+      final start = chunkIndex * safeChunkSize;
+      final end = math.min(start + safeChunkSize, totalItems);
+      final chunk = media.sublist(start, end);
+      final chunkBase = processed;
+
+      final chunkResult = await scanMediaBatch(
+        media: chunk,
+        settings: settings,
+        onProgress: onProgress == null
+            ? null
+            : (chunkProgress) {
+                final normalizedProcessed =
+                    (chunkBase + chunkProgress.processed).clamp(0, totalItems);
+                final normalizedPercent = totalItems <= 0
+                    ? 0.0
+                    : (normalizedProcessed / totalItems).clamp(0.0, 1.0);
+                onProgress(
+                  NsfwMediaBatchProgress(
+                    processed: normalizedProcessed,
+                    total: totalItems,
+                    percent: normalizedPercent,
+                    currentPath: chunkProgress.currentPath,
+                    currentType: chunkProgress.currentType,
+                    error: chunkProgress.error,
+                  ),
+                );
+              },
+      );
+
+      processed += chunkResult.processed;
+      successCount += chunkResult.successCount;
+      errorCount += chunkResult.errorCount;
+      flaggedCount += chunkResult.flaggedCount;
+
+      if (includeCleanResults) {
+        items.addAll(chunkResult.items);
+      } else {
+        items.addAll(
+          chunkResult.items.where((item) => item.hasError || item.isNsfw),
+        );
+      }
+
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    return NsfwMediaBatchResult(
+      items: items,
+      processed: processed,
+      successCount: successCount,
+      errorCount: errorCount,
+      flaggedCount: flaggedCount,
+    );
+  }
+
+  Future<void> dispose() {
+    return _platform.disposeScanner();
+  }
+
+  Future<void> cancelScan({String? scanId}) {
+    return _platform.cancelScan(scanId: scanId);
+  }
+
+  Future<String?> loadImageThumbnail({
+    required String assetRef,
+    int width = 160,
+    int height = 160,
+    int quality = 70,
+  }) async {
+    final normalizedRef = assetRef.trim();
+    if (normalizedRef.isEmpty) {
+      return null;
+    }
+    return _platform.loadImageThumbnail(
+      assetRef: normalizedRef,
+      width: width.clamp(64, 1024).toInt(),
+      height: height.clamp(64, 1024).toInt(),
+      quality: quality.clamp(30, 95).toInt(),
+    );
+  }
+
+  Future<String?> loadImageAsset({required String assetRef}) async {
+    final normalizedRef = assetRef.trim();
+    if (normalizedRef.isEmpty) {
+      return null;
+    }
+    return _platform.loadImageAsset(assetRef: normalizedRef);
+  }
+
+  Future<String?> loadImageThumnbail({
+    required String assetRef,
+    int width = 160,
+    int height = 160,
+    int quality = 70,
+  }) {
+    return loadImageThumbnail(
+      assetRef: assetRef,
+      width: width,
+      height: height,
+      quality: quality,
+    );
+  }
+
+  Future<String?> loadImageAssets({required String assetRef}) {
+    return loadImageAsset(assetRef: assetRef);
+  }
+
+  Future<NsfwPickedMedia?> pickSingleMedia({
+    bool allowImages = true,
+    bool allowVideos = true,
+  }) async {
+    if (!allowImages && !allowVideos) {
+      return null;
+    }
+    final payload = await _platform.pickMedia(
+      multiple: false,
+      allowImages: allowImages,
+      allowVideos: allowVideos,
+    );
+    if (payload == null) {
+      return null;
+    }
+    final parsed = _parsePickedMediaPayload(payload);
+    if (parsed == null || parsed.isEmpty) {
+      return null;
+    }
+    return parsed;
+  }
+
+  Future<NsfwPickedMedia?> pickMedia({
+    NsfwPickerMode mode = NsfwPickerMode.single,
+    bool allowImages = true,
+    bool allowVideos = true,
+  }) async {
+    if (mode == NsfwPickerMode.single) {
+      return pickSingleMedia(
+        allowImages: allowImages,
+        allowVideos: allowVideos,
+      );
+    }
+
+    final picked = await pickMultipleMedia(
+      allowImages: allowImages,
+      allowVideos: allowVideos,
+    );
+    return picked.isEmpty ? null : picked;
+  }
+
+  Future<NsfwPickedMedia> pickMultipleMedia({
+    bool allowImages = true,
+    bool allowVideos = true,
+  }) async {
+    if (!allowImages && !allowVideos) {
+      return const NsfwPickedMedia(imagePaths: [], videoPaths: []);
+    }
+    final payload = await _platform.pickMedia(
+      multiple: true,
+      allowImages: allowImages,
+      allowVideos: allowVideos,
+    );
+    final parsed = payload == null ? null : _parsePickedMediaPayload(payload);
+    return parsed ?? const NsfwPickedMedia(imagePaths: [], videoPaths: []);
+  }
+
+  Future<NsfwLoadedAsset?> loadAsset({
+    String? assetId,
+    bool allowImages = true,
+    bool allowVideos = true,
+    bool includeOriginFileFallback = false,
+  }) async {
+    if (!allowImages && !allowVideos) {
+      return null;
+    }
+
+    if (assetId != null && assetId.trim().isNotEmpty) {
+      final permission = await PhotoManager.requestPermissionExtend();
+      if (!permission.hasAccess) {
+        throw const FormatException('Gallery permission not granted.');
+      }
+      final asset = await AssetEntity.fromId(assetId.trim());
+      if (asset == null) {
+        return null;
+      }
+      final type = _toMediaType(asset.type);
+      if (type == null) {
+        return null;
+      }
+      if ((type == NsfwMediaType.image && !allowImages) ||
+          (type == NsfwMediaType.video && !allowVideos)) {
+        return null;
+      }
+      final path = await _resolveAssetPath(
+        asset,
+        includeOriginFileFallback: includeOriginFileFallback,
+      );
+      if (path == null || path.isEmpty) {
+        return null;
+      }
+      return NsfwLoadedAsset(path: path, type: type, id: asset.id);
+    }
+
+    final picked = await pickSingleMedia(
+      allowImages: allowImages,
+      allowVideos: allowVideos,
+    );
+    if (picked == null) {
+      return null;
+    }
+    if (picked.videoPaths.isNotEmpty) {
+      return NsfwLoadedAsset(
+        path: picked.videoPaths.first,
+        type: NsfwMediaType.video,
+      );
+    }
+    if (picked.imagePaths.isNotEmpty) {
+      return NsfwLoadedAsset(
+        path: picked.imagePaths.first,
+        type: NsfwMediaType.image,
+      );
+    }
+    return null;
+  }
+
+  Future<List<NsfwAssetRef>> loadMultipleAssets({
+    bool includeImages = true,
+    bool includeVideos = true,
+    int pageSize = 300,
+    int startPage = 0,
+    int? maxPages,
+    int? maxItems,
+    void Function(NsfwGalleryLoadProgress progress)? onProgress,
+  }) async {
+    if (!includeImages && !includeVideos) {
+      return const [];
+    }
+    final permission = await PhotoManager.requestPermissionExtend();
+    if (!permission.hasAccess) {
+      throw const FormatException('Gallery permission not granted.');
+    }
+    final album = await _getAllAlbum();
+    if (album == null) {
+      return const [];
+    }
+
+    final totalAssets = await album.assetCountAsync;
+    final safePageSize = pageSize.clamp(20, 2000);
+    var page = startPage < 0 ? 0 : startPage;
+    var start = page * safePageSize;
+    if (start >= totalAssets) {
+      return const [];
+    }
+    final endPageExclusive = maxPages == null || maxPages <= 0
+        ? null
+        : page + maxPages;
+    final refs = <NsfwAssetRef>[];
+    var scannedAssets = 0;
+
+    while (start < totalAssets) {
+      if (endPageExclusive != null && page >= endPageExclusive) {
+        break;
+      }
+      final end = math.min(start + safePageSize, totalAssets);
+      final pageResult = await _loadAssetRefsFromRange(
+        album: album,
+        start: start,
+        end: end,
+        includeImages: includeImages,
+        includeVideos: includeVideos,
+      );
+
+      scannedAssets += pageResult.scannedAssets;
+      refs.addAll(pageResult.refs);
+
+      onProgress?.call(
+        NsfwGalleryLoadProgress(
+          page: page,
+          scannedAssets: scannedAssets,
+          imageCount: refs.where((item) => item.isImage).length,
+          videoCount: refs.where((item) => item.isVideo).length,
+          targetCount: maxItems,
+          isCompleted: false,
+        ),
+      );
+
+      if (maxItems != null && refs.length >= maxItems) {
+        break;
+      }
+
+      start += safePageSize;
+      page += 1;
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    final limited = maxItems == null
+        ? refs
+        : refs.take(maxItems).toList(growable: false);
+    onProgress?.call(
+      NsfwGalleryLoadProgress(
+        page: page,
+        scannedAssets: scannedAssets,
+        imageCount: limited.where((item) => item.isImage).length,
+        videoCount: limited.where((item) => item.isVideo).length,
+        targetCount: maxItems,
+        isCompleted: true,
+      ),
+    );
+    return limited;
+  }
+
+  Future<List<NsfwAssetRef>> loadMultibleAssets({
+    bool includeImages = true,
+    bool includeVideos = true,
+    int pageSize = 300,
+    int startPage = 0,
+    int? maxPages,
+    int? maxItems,
+    void Function(NsfwGalleryLoadProgress progress)? onProgress,
+  }) {
+    return loadMultipleAssets(
+      includeImages: includeImages,
+      includeVideos: includeVideos,
+      pageSize: pageSize,
+      startPage: startPage,
+      maxPages: maxPages,
+      maxItems: maxItems,
+      onProgress: onProgress,
+    );
+  }
+
+  Future<NsfwAssetPage> loadMultipleWithRange({
+    required int start,
+    required int end,
+    bool includeImages = true,
+    bool includeVideos = true,
+  }) async {
+    if (!includeImages && !includeVideos) {
+      return const NsfwAssetPage(items: [], totalAssets: 0, start: 0, end: 0);
+    }
+    final permission = await PhotoManager.requestPermissionExtend();
+    if (!permission.hasAccess) {
+      throw const FormatException('Gallery permission not granted.');
+    }
+    final album = await _getAllAlbum();
+    if (album == null) {
+      return const NsfwAssetPage(items: [], totalAssets: 0, start: 0, end: 0);
+    }
+
+    final totalAssets = await album.assetCountAsync;
+    if (totalAssets <= 0) {
+      return const NsfwAssetPage(items: [], totalAssets: 0, start: 0, end: 0);
+    }
+
+    final normalizedStart = start < 0 ? 0 : start;
+    final normalizedEnd = end <= normalizedStart
+        ? math.min(normalizedStart + 1, totalAssets)
+        : math.min(end, totalAssets);
+    if (normalizedStart >= totalAssets) {
+      return NsfwAssetPage(
+        items: const [],
+        totalAssets: totalAssets,
+        start: totalAssets,
+        end: totalAssets,
+      );
+    }
+
+    final pageResult = await _loadAssetRefsFromRange(
+      album: album,
+      start: normalizedStart,
+      end: normalizedEnd,
+      includeImages: includeImages,
+      includeVideos: includeVideos,
+    );
+    return NsfwAssetPage(
+      items: pageResult.refs,
+      totalAssets: totalAssets,
+      start: normalizedStart,
+      end: normalizedEnd,
+    );
+  }
+
+  Future<NsfwAssetPage> loadMultibleWithRange({
+    required int start,
+    required int end,
+    bool includeImages = true,
+    bool includeVideos = true,
+  }) {
+    return loadMultipleWithRange(
+      start: start,
+      end: end,
+      includeImages: includeImages,
+      includeVideos: includeVideos,
+    );
+  }
+
+  Future<NsfwPickedMedia> loadGalleryMedia({
+    bool includeImages = true,
+    bool includeVideos = true,
+    int pageSize = 200,
+    int startPage = 0,
+    int? maxPages,
+    int? maxItems,
+    bool includeOriginFileFallback = false,
+    void Function(NsfwGalleryLoadProgress progress)? onProgress,
+  }) async {
+    if (!includeImages && !includeVideos) {
+      return const NsfwPickedMedia(imagePaths: [], videoPaths: []);
+    }
+    final permission = await PhotoManager.requestPermissionExtend();
+    if (!permission.hasAccess) {
+      throw const FormatException('Gallery permission not granted.');
+    }
+    final allAlbums = await PhotoManager.getAssetPathList(
+      type: RequestType.common,
+      onlyAll: true,
+    );
+    if (allAlbums.isEmpty) {
+      return const NsfwPickedMedia(imagePaths: [], videoPaths: []);
+    }
+
+    final imagePaths = <String>{};
+    final videoPaths = <String>{};
+    final album = allAlbums.first;
+    final totalAssets = await album.assetCountAsync;
+    final safePageSize = pageSize.clamp(20, 1000);
+    var page = startPage < 0 ? 0 : startPage;
+    var start = page * safePageSize;
+    if (start >= totalAssets) {
+      return const NsfwPickedMedia(imagePaths: [], videoPaths: []);
+    }
+    final endPageExclusive = maxPages == null || maxPages <= 0
+        ? null
+        : page + maxPages;
+    var scannedAssets = 0;
+
+    while (start < totalAssets) {
+      if (endPageExclusive != null && page >= endPageExclusive) {
+        break;
+      }
+      final end = math.min(start + safePageSize, totalAssets);
+      final assets = await album.getAssetListRange(start: start, end: end);
+      if (assets.isEmpty) {
+        break;
+      }
+      for (final asset in assets) {
+        if (asset.type != AssetType.image && asset.type != AssetType.video) {
+          scannedAssets += 1;
+          continue;
+        }
+        if (asset.type == AssetType.image && !includeImages) {
+          scannedAssets += 1;
+          continue;
+        }
+        if (asset.type == AssetType.video && !includeVideos) {
+          scannedAssets += 1;
+          continue;
+        }
+        final path = (await asset.file)?.path.trim();
+        final resolvedPath = (path != null && path.isNotEmpty)
+            ? path
+            : includeOriginFileFallback
+            ? (await asset.originFile)?.path.trim()
+            : null;
+        scannedAssets += 1;
+        if (resolvedPath == null || resolvedPath.isEmpty) {
+          continue;
+        }
+        if (asset.type == AssetType.video) {
+          videoPaths.add(resolvedPath);
+        } else {
+          imagePaths.add(resolvedPath);
+        }
+        if (maxItems != null &&
+            (imagePaths.length + videoPaths.length) >= maxItems) {
+          break;
+        }
+      }
+
+      onProgress?.call(
+        NsfwGalleryLoadProgress(
+          page: page,
+          scannedAssets: scannedAssets,
+          imageCount: imagePaths.length,
+          videoCount: videoPaths.length,
+          targetCount: maxItems,
+          isCompleted: false,
+        ),
+      );
+      if (maxItems != null &&
+          (imagePaths.length + videoPaths.length) >= maxItems) {
+        break;
+      }
+      start += safePageSize;
+      page += 1;
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    onProgress?.call(
+      NsfwGalleryLoadProgress(
+        page: page,
+        scannedAssets: scannedAssets,
+        imageCount: imagePaths.length,
+        videoCount: videoPaths.length,
+        targetCount: maxItems,
+        isCompleted: true,
+      ),
+    );
+
+    return NsfwPickedMedia(
+      imagePaths: imagePaths.toList(growable: false),
+      videoPaths: videoPaths.toList(growable: false),
+      scannedAssets: scannedAssets,
+    );
+  }
+
+  Future<NsfwMediaBatchResult> scanWholeGallery({
+    NsfwMediaBatchSettings settings = const NsfwMediaBatchSettings(),
+    bool includeImages = true,
+    bool includeVideos = true,
+    int pageSize = 200,
+    int startPage = 0,
+    int? maxPages,
+    int? maxItems,
+    int scanChunkSize = 80,
+    bool preferThumbnailForImages = false,
+    int thumbnailWidth = 320,
+    int thumbnailHeight = 320,
+    int thumbnailQuality = 65,
+    bool includeCleanResults = false,
+    int resolveConcurrency = 6,
+    bool includeOriginFileFallback = false,
+    int loadProgressEvery = 24,
+    bool debugLogging = false,
+    void Function(NsfwGalleryLoadProgress progress)? onLoadProgress,
+    void Function(NsfwMediaBatchProgress progress)? onScanProgress,
+    void Function(NsfwMediaBatchResult chunkResult)? onChunkResult,
+  }) async {
+    final scanId =
+        'gallery_${DateTime.now().microsecondsSinceEpoch}_${_scanCounter++}';
+    final streamedItems = <NsfwMediaBatchItemResult>[];
+    var streamedProcessed = 0;
+    var streamedSuccess = 0;
+    var streamedErrors = 0;
+    var streamedFlagged = 0;
+    final completionSignal = Completer<void>();
+
+    final subscription = _platform.progressStream
+        .where((event) => '${event['scanId'] ?? ''}' == scanId)
+        .listen((event) {
+          final eventType = '${event['eventType'] ?? ''}';
+          if (eventType == 'gallery_load_progress') {
+            onLoadProgress?.call(
+              NsfwGalleryLoadProgress(
+                page: _toInt(event['page']),
+                scannedAssets: _toInt(event['scannedAssets']),
+                imageCount: _toInt(event['imageCount']),
+                videoCount: _toInt(event['videoCount']),
+                targetCount: _toInt(event['targetCount']),
+                isCompleted: event['isCompleted'] == true,
+              ),
+            );
+            return;
+          }
+
+          if (eventType == 'gallery_result_batch') {
+            final chunkResult = _parseMediaBatchResult(event);
+            streamedItems.addAll(chunkResult.items);
+            streamedSuccess += chunkResult.successCount;
+            streamedErrors += chunkResult.errorCount;
+            streamedFlagged += chunkResult.flaggedCount;
+            streamedProcessed = _toInt(
+              event['processedTotal'],
+              fallback: streamedProcessed + chunkResult.processed,
+            );
+            if (chunkResult.items.isNotEmpty) {
+              onChunkResult?.call(chunkResult);
+            }
+            return;
+          }
+
+          if (eventType == 'gallery_scan_progress') {
+            final progress = NsfwScanProgress.fromMap(event);
+            final resolvedType =
+                _normalizeMediaType(progress.mediaType) ?? NsfwMediaType.image;
+            onScanProgress?.call(
+              NsfwMediaBatchProgress(
+                processed: progress.processed,
+                total: progress.total,
+                percent: progress.percent,
+                currentPath: progress.imagePath ?? '',
+                currentType: resolvedType,
+                error: progress.error,
+              ),
+            );
+            if (progress.isCompleted && !completionSignal.isCompleted) {
+              completionSignal.complete();
+            }
+          }
+        });
+
+    try {
+      final payload = await _platform.scanGallery(
+        scanId: scanId,
+        settings: {
+          'includeImages': includeImages,
+          'includeVideos': includeVideos,
+          'pageSize': pageSize,
+          'startPage': startPage,
+          'maxPages': maxPages,
+          'maxItems': maxItems,
+          'scanChunkSize': scanChunkSize,
+          'preferThumbnailForImages': preferThumbnailForImages,
+          'thumbnailWidth': thumbnailWidth,
+          'thumbnailHeight': thumbnailHeight,
+          'thumbnailQuality': thumbnailQuality,
+          'thumbnailSize': math.min(thumbnailWidth, thumbnailHeight),
+          'includeCleanResults': includeCleanResults,
+          'resolveConcurrency': resolveConcurrency,
+          'includeOriginFileFallback': includeOriginFileFallback,
+          'loadProgressEvery': loadProgressEvery,
+          'debugLogging': debugLogging,
+          'imageThreshold': settings.imageThreshold,
+          'videoThreshold': settings.videoThreshold,
+          'videoSampleRateFps': settings.videoSampleRateFps,
+          'videoMaxFrames': settings.videoMaxFrames,
+          'dynamicVideoSampleRate': settings.dynamicVideoSampleRate,
+          'shortVideoMinSampleRateFps': settings.shortVideoMinSampleRateFps,
+          'shortVideoMaxSampleRateFps': settings.shortVideoMaxSampleRateFps,
+          'mediumVideoMinutesThreshold': settings.mediumVideoMinutesThreshold,
+          'longVideoMinutesThreshold': settings.longVideoMinutesThreshold,
+          'mediumVideoSampleRateFps': settings.mediumVideoSampleRateFps,
+          'longVideoSampleRateFps': settings.longVideoSampleRateFps,
+          'videoEarlyStopEnabled': settings.videoEarlyStopEnabled,
+          'videoEarlyStopBaseNsfwFrames': settings.videoEarlyStopBaseNsfwFrames,
+          'videoEarlyStopMediumBonusFrames':
+              settings.videoEarlyStopMediumBonusFrames,
+          'videoEarlyStopLongBonusFrames':
+              settings.videoEarlyStopLongBonusFrames,
+          'videoEarlyStopVeryLongMinutesThreshold':
+              settings.videoEarlyStopVeryLongMinutesThreshold,
+          'videoEarlyStopVeryLongBonusFrames':
+              settings.videoEarlyStopVeryLongBonusFrames,
+          'maxConcurrency': settings.maxConcurrency,
+          'continueOnError': settings.continueOnError,
+        },
+      );
+
+      if (!completionSignal.isCompleted) {
+        await completionSignal.future.timeout(
+          const Duration(milliseconds: 400),
+          onTimeout: () {},
+        );
+      }
+
+      final parsed = _parseMediaBatchResult(payload);
+      if (streamedItems.isEmpty && parsed.items.isNotEmpty) {
+        streamedItems.addAll(parsed.items);
+      }
+
+      return NsfwMediaBatchResult(
+        items: streamedItems,
+        processed: _toInt(payload['processed'], fallback: streamedProcessed),
+        successCount: _toInt(
+          payload['successCount'],
+          fallback: streamedSuccess,
+        ),
+        errorCount: _toInt(payload['errorCount'], fallback: streamedErrors),
+        flaggedCount: _toInt(
+          payload['flaggedCount'],
+          fallback: streamedFlagged,
+        ),
+      );
+    } finally {
+      await subscription.cancel();
+    }
+  }
+
+  Future<NsfwMediaBatchResult> scanGallery({
+    NsfwMediaBatchSettings settings = const NsfwMediaBatchSettings(),
+    bool includeImages = true,
+    bool includeVideos = true,
+    int pageSize = 120,
+    int scanChunkSize = 40,
+    int resolveConcurrency = 4,
+    bool includeCleanResults = false,
+    int loadProgressEvery = 20,
+    bool debugLogging = false,
+    void Function(NsfwGalleryLoadProgress progress)? onLoadProgress,
+    void Function(NsfwMediaBatchProgress progress)? onScanProgress,
+    void Function(NsfwMediaBatchResult chunkResult)? onChunkResult,
+  }) {
+    return scanWholeGallery(
+      settings: settings,
+      includeImages: includeImages,
+      includeVideos: includeVideos,
+      pageSize: pageSize,
+      scanChunkSize: scanChunkSize,
+      resolveConcurrency: resolveConcurrency,
+      includeCleanResults: includeCleanResults,
+      loadProgressEvery: loadProgressEvery,
+      debugLogging: debugLogging,
+      onLoadProgress: onLoadProgress,
+      onScanProgress: onScanProgress,
+      onChunkResult: onChunkResult,
+    );
+  }
+
+  Future<NsfwMediaBatchItemResult> scanMedia({
+    String? mediaPath,
+    NsfwAssetRef? assetRef,
+    NsfwMediaBatchSettings settings = const NsfwMediaBatchSettings(),
+    bool includeOriginFileFallback = false,
+    void Function(NsfwScanProgress progress)? onProgress,
+  }) async {
+    final resolvedPath = mediaPath?.trim();
+    final hasPath = resolvedPath != null && resolvedPath.isNotEmpty;
+    final hasRef = assetRef != null;
+    if (!hasPath && !hasRef) {
+      throw const FormatException('Provide mediaPath or assetRef.');
+    }
+
+    final type = hasRef
+        ? assetRef.type
+        : _inferMediaType(path: resolvedPath!, mimeType: null);
+    final path = hasPath
+        ? resolvedPath
+        : (await loadAsset(
+            assetId: assetRef!.id,
+            allowImages: assetRef.isImage,
+            allowVideos: assetRef.isVideo,
+            includeOriginFileFallback: includeOriginFileFallback,
+          ))?.path;
+    if (path == null || path.isEmpty) {
+      throw const FormatException('Unable to resolve media path.');
+    }
+
+    if (type == NsfwMediaType.video) {
+      final videoResult = await scanVideo(
+        videoPath: path,
+        threshold: settings.videoThreshold,
+        sampleRateFps: settings.videoSampleRateFps,
+        maxFrames: settings.videoMaxFrames,
+        dynamicSampleRate: settings.dynamicVideoSampleRate,
+        shortVideoMinSampleRateFps: settings.shortVideoMinSampleRateFps,
+        shortVideoMaxSampleRateFps: settings.shortVideoMaxSampleRateFps,
+        mediumVideoMinutesThreshold: settings.mediumVideoMinutesThreshold,
+        longVideoMinutesThreshold: settings.longVideoMinutesThreshold,
+        mediumVideoSampleRateFps: settings.mediumVideoSampleRateFps,
+        longVideoSampleRateFps: settings.longVideoSampleRateFps,
+        videoEarlyStopEnabled: settings.videoEarlyStopEnabled,
+        videoEarlyStopBaseNsfwFrames: settings.videoEarlyStopBaseNsfwFrames,
+        videoEarlyStopMediumBonusFrames:
+            settings.videoEarlyStopMediumBonusFrames,
+        videoEarlyStopLongBonusFrames: settings.videoEarlyStopLongBonusFrames,
+        videoEarlyStopVeryLongMinutesThreshold:
+            settings.videoEarlyStopVeryLongMinutesThreshold,
+        videoEarlyStopVeryLongBonusFrames:
+            settings.videoEarlyStopVeryLongBonusFrames,
+        onProgress: onProgress,
+      );
+      return NsfwMediaBatchItemResult(
+        path: path,
+        type: NsfwMediaType.video,
+        videoResult: videoResult,
+      );
+    }
+
+    final imageResult = await scanImage(
+      imagePath: path,
+      threshold: settings.imageThreshold,
+    );
+    return NsfwMediaBatchItemResult(
+      path: path,
+      type: NsfwMediaType.image,
+      imageResult: imageResult,
+    );
+  }
+
+  Future<NsfwMediaBatchResult> scanMultipleMedia({
+    bool pickIfEmpty = true,
+    List<String> imagePaths = const [],
+    List<String> videoPaths = const [],
+    List<NsfwAssetRef> assetRefs = const [],
+    NsfwMediaBatchSettings settings = const NsfwMediaBatchSettings(),
+    int chunkSize = 80,
+    bool includeCleanResults = true,
+    int resolveConcurrency = 4,
+    bool includeOriginFileFallback = false,
+    void Function(NsfwMediaBatchProgress progress)? onProgress,
+  }) async {
+    final normalizedImagePaths = imagePaths
+        .map((path) => path.trim())
+        .where((path) => path.isNotEmpty)
+        .toList(growable: false);
+    final normalizedVideoPaths = videoPaths
+        .map((path) => path.trim())
+        .where((path) => path.isNotEmpty)
+        .toList(growable: false);
+
+    var effectiveImagePaths = normalizedImagePaths;
+    var effectiveVideoPaths = normalizedVideoPaths;
+    if (effectiveImagePaths.isEmpty &&
+        effectiveVideoPaths.isEmpty &&
+        assetRefs.isEmpty &&
+        pickIfEmpty) {
+      final picked = await pickMultipleMedia();
+      effectiveImagePaths = picked.imagePaths;
+      effectiveVideoPaths = picked.videoPaths;
+    }
+
+    final media = <NsfwMediaInput>[
+      ...effectiveImagePaths.map(NsfwMediaInput.image),
+      ...effectiveVideoPaths.map(NsfwMediaInput.video),
+    ];
+    if (assetRefs.isNotEmpty) {
+      final resolved = await _resolveAssetRefs(
+        assetRefs,
+        resolveConcurrency: resolveConcurrency,
+        includeOriginFileFallback: includeOriginFileFallback,
+      );
+      media.addAll(resolved.map((item) => item.toMediaInput()));
+    }
+    if (media.isEmpty) {
+      return const NsfwMediaBatchResult(
+        items: [],
+        processed: 0,
+        successCount: 0,
+        errorCount: 0,
+        flaggedCount: 0,
+      );
+    }
+
+    return scanMediaInChunks(
+      media: media,
+      settings: settings,
+      chunkSize: chunkSize,
+      includeCleanResults: includeCleanResults,
+      onProgress: onProgress,
+    );
+  }
+
+  Future<NsfwMediaBatchResult> multiScan({
+    List<String> imagePaths = const [],
+    List<String> videoPaths = const [],
+    NsfwMediaBatchSettings settings = const NsfwMediaBatchSettings(),
+    int chunkSize = 80,
+    bool includeCleanResults = true,
+    void Function(NsfwMediaBatchProgress progress)? onProgress,
+  }) {
+    final media = <NsfwMediaInput>[
+      ...imagePaths
+          .where((path) => path.trim().isNotEmpty)
+          .map((path) => NsfwMediaInput.image(path.trim())),
+      ...videoPaths
+          .where((path) => path.trim().isNotEmpty)
+          .map((path) => NsfwMediaInput.video(path.trim())),
+    ];
+    return scanMediaInChunks(
+      media: media,
+      settings: settings,
+      chunkSize: chunkSize,
+      includeCleanResults: includeCleanResults,
+      onProgress: onProgress,
+    );
+  }
+
+  Future<AssetPathEntity?> _getAllAlbum() async {
+    final allAlbums = await PhotoManager.getAssetPathList(
+      type: RequestType.common,
+      onlyAll: true,
+    );
+    if (allAlbums.isEmpty) {
+      return null;
+    }
+    return allAlbums.first;
+  }
+
+  Future<void> _ensureGalleryPermissionGranted() async {
+    final permission = await PhotoManager.requestPermissionExtend();
+    if (!permission.hasAccess) {
+      throw const FormatException(
+        'Gallery permission denied. Please grant media/photo access before initializing the scanner.',
+      );
+    }
+  }
+
+  NsfwPickedMedia? _parsePickedMediaPayload(Map<String, dynamic> payload) {
+    final images = (payload['imagePaths'] as List?)
+        ?.map((item) => '${item ?? ''}'.trim())
+        ?.where((path) => path.isNotEmpty)
+        ?.toSet()
+        ?.toList(growable: false);
+    final videos = (payload['videoPaths'] as List?)
+        ?.map((item) => '${item ?? ''}'.trim())
+        ?.where((path) => path.isNotEmpty)
+        ?.toSet()
+        ?.toList(growable: false);
+    return NsfwPickedMedia(
+      imagePaths: images ?? const [],
+      videoPaths: videos ?? const [],
+    );
+  }
+
+  Future<_AssetRefLoadResult> _loadAssetRefsFromRange({
+    required AssetPathEntity album,
+    required int start,
+    required int end,
+    required bool includeImages,
+    required bool includeVideos,
+  }) async {
+    final assets = await album.getAssetListRange(start: start, end: end);
+    if (assets.isEmpty) {
+      return const _AssetRefLoadResult(refs: [], scannedAssets: 0);
+    }
+    final refs = <NsfwAssetRef>[];
+    for (final asset in assets) {
+      final mediaType = _toMediaType(asset.type);
+      if (mediaType == null) {
+        continue;
+      }
+      if (mediaType == NsfwMediaType.image && !includeImages) {
+        continue;
+      }
+      if (mediaType == NsfwMediaType.video && !includeVideos) {
+        continue;
+      }
+      refs.add(
+        NsfwAssetRef(
+          id: asset.id,
+          type: mediaType,
+          width: asset.width,
+          height: asset.height,
+          durationSeconds: asset.duration,
+          createDateSecond: asset.createDateSecond ?? 0,
+          modifiedDateSecond: asset.modifiedDateSecond ?? 0,
+        ),
+      );
+    }
+    return _AssetRefLoadResult(refs: refs, scannedAssets: assets.length);
+  }
+
+  Future<String?> _resolveAssetPath(
+    AssetEntity asset, {
+    required bool includeOriginFileFallback,
+  }) async {
+    final primaryPath = (await asset.file)?.path.trim();
+    if (primaryPath != null && primaryPath.isNotEmpty) {
+      return primaryPath;
+    }
+    if (!includeOriginFileFallback) {
+      return null;
+    }
+    final fallbackPath = (await asset.originFile)?.path.trim();
+    if (fallbackPath == null || fallbackPath.isEmpty) {
+      return null;
+    }
+    return fallbackPath;
+  }
+
+  Future<List<NsfwLoadedAsset>> _resolveAssetRefs(
+    List<NsfwAssetRef> refs, {
+    required int resolveConcurrency,
+    required bool includeOriginFileFallback,
+  }) async {
+    if (refs.isEmpty) {
+      return const [];
+    }
+    final safeConcurrency = resolveConcurrency.clamp(1, 12);
+    final resolved = <NsfwLoadedAsset>[];
+    var cursor = 0;
+    while (cursor < refs.length) {
+      final end = math.min(cursor + safeConcurrency, refs.length);
+      final chunk = refs.sublist(cursor, end);
+      final chunkResults = await Future.wait(
+        chunk.map((ref) async {
+          final loaded = await loadAsset(
+            assetId: ref.id,
+            allowImages: ref.isImage,
+            allowVideos: ref.isVideo,
+            includeOriginFileFallback: includeOriginFileFallback,
+          );
+          return loaded;
+        }),
+      );
+      for (final loaded in chunkResults) {
+        if (loaded != null) {
+          resolved.add(loaded);
+        }
+      }
+      cursor = end;
+      await Future<void>.delayed(Duration.zero);
+    }
+    return resolved;
+  }
+}
+
+class _AssetRefLoadResult {
+  const _AssetRefLoadResult({required this.refs, required this.scannedAssets});
+
+  final List<NsfwAssetRef> refs;
+  final int scannedAssets;
+}
+
+NsfwMediaType? _toMediaType(AssetType type) {
+  if (type == AssetType.image) {
+    return NsfwMediaType.image;
+  }
+  if (type == AssetType.video) {
+    return NsfwMediaType.video;
+  }
+  return null;
+}
+
+NsfwMediaType _inferMediaType({required String path, String? mimeType}) {
+  final normalizedMime = mimeType?.toLowerCase();
+  if (normalizedMime != null) {
+    if (normalizedMime.startsWith('video/')) {
+      return NsfwMediaType.video;
+    }
+    if (normalizedMime.startsWith('image/')) {
+      return NsfwMediaType.image;
+    }
+  }
+  final extension = path.toLowerCase();
+  const videoExtensions = {
+    '.mp4',
+    '.mov',
+    '.m4v',
+    '.avi',
+    '.mkv',
+    '.webm',
+    '.3gp',
+    '.3gpp',
+    '.mpeg',
+    '.mpg',
+    '.wmv',
+    '.flv',
+    '.ts',
+    '.m2ts',
+    '.mts',
+    '.qt',
+  };
+  for (final suffix in videoExtensions) {
+    if (extension.endsWith(suffix)) {
+      return NsfwMediaType.video;
+    }
+  }
+  return NsfwMediaType.image;
+}
+
+NsfwMediaType? _normalizeMediaType(String? mediaType) {
+  if (mediaType == null || mediaType == 'null') {
+    return null;
+  }
+  if (mediaType.toLowerCase() == 'video') {
+    return NsfwMediaType.video;
+  }
+  if (mediaType.toLowerCase() == 'image') {
+    return NsfwMediaType.image;
+  }
+  return null;
+}
+
+NsfwMediaBatchResult _parseMediaBatchResult(Map<String, dynamic> payload) {
+  final rawItems = payload['items'];
+  final items = <NsfwMediaBatchItemResult>[];
+
+  if (rawItems is List) {
+    for (final entry in rawItems) {
+      if (entry is! Map) {
+        continue;
+      }
+      final itemMap = <String, dynamic>{};
+      for (final item in entry.entries) {
+        itemMap['${item.key}'] = item.value;
+      }
+      final type = '${itemMap['type']}'.toLowerCase() == 'video'
+          ? NsfwMediaType.video
+          : NsfwMediaType.image;
+      final rawImageResult = itemMap['imageResult'];
+      final rawVideoResult = itemMap['videoResult'];
+      items.add(
+        NsfwMediaBatchItemResult(
+          path:
+              '${itemMap['path'] ?? itemMap['uri'] ?? itemMap['assetId'] ?? ''}',
+          type: type,
+          assetId: _toNullableString(itemMap['assetId']),
+          uri: _toNullableString(itemMap['uri']),
+          imageResult: rawImageResult is Map
+              ? NsfwScanResult.fromMap(
+                  rawImageResult.map((key, value) => MapEntry('$key', value)),
+                )
+              : null,
+          videoResult: rawVideoResult is Map
+              ? NsfwVideoScanResult.fromMap(
+                  rawVideoResult.map((key, value) => MapEntry('$key', value)),
+                )
+              : null,
+          error: _toNullableString(itemMap['error']),
+        ),
+      );
+    }
+  }
+
+  return NsfwMediaBatchResult(
+    items: items,
+    processed: _toInt(payload['processed'], fallback: items.length),
+    successCount: _toInt(
+      payload['successCount'],
+      fallback: items.where((item) => !item.hasError).length,
+    ),
+    errorCount: _toInt(
+      payload['errorCount'],
+      fallback: items.where((item) => item.hasError).length,
+    ),
+    flaggedCount: _toInt(
+      payload['flaggedCount'],
+      fallback: items.where((item) => item.isNsfw).length,
+    ),
+  );
+}
+
+int _toInt(dynamic value, {int fallback = 0}) {
+  if (value is int) {
+    return value;
+  }
+  if (value is double) {
+    return value.round();
+  }
+  if (value is String) {
+    return int.tryParse(value) ?? fallback;
+  }
+  return fallback;
+}
+
+String? _toNullableString(dynamic value) {
+  if (value == null) {
+    return null;
+  }
+  final asString = value.toString();
+  if (asString.isEmpty || asString == 'null') {
+    return null;
+  }
+  return asString;
+}
