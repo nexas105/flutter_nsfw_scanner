@@ -14,12 +14,12 @@ class NsfwScanWizardStepHeader extends StatelessWidget {
     this.isStepDone,
     this.padding = const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
     this.spacing = 8,
-    this.activeColor = const Color(0xFF0A7A8C),
-    this.completedColor = const Color(0xFF2E7D32),
-    this.idleColor = Colors.white,
-    this.idleTextColor = const Color(0xFF33464D),
-    this.activeTextColor = Colors.white,
-    this.chipBorderColor = const Color(0xFFB7C9CD),
+    this.activeColor,
+    this.completedColor,
+    this.idleColor,
+    this.idleTextColor,
+    this.activeTextColor,
+    this.chipBorderColor,
   });
 
   final List<String> stepLabels;
@@ -27,15 +27,24 @@ class NsfwScanWizardStepHeader extends StatelessWidget {
   final NsfwStepIsDone? isStepDone;
   final EdgeInsets padding;
   final double spacing;
-  final Color activeColor;
-  final Color completedColor;
-  final Color idleColor;
-  final Color idleTextColor;
-  final Color activeTextColor;
-  final Color chipBorderColor;
+  final Color? activeColor;
+  final Color? completedColor;
+  final Color? idleColor;
+  final Color? idleTextColor;
+  final Color? activeTextColor;
+  final Color? chipBorderColor;
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final resolvedActiveColor = activeColor ?? colorScheme.primary;
+    final resolvedCompletedColor = completedColor ?? colorScheme.tertiary;
+    final resolvedIdleColor = idleColor ?? colorScheme.surface;
+    final resolvedIdleTextColor = idleTextColor ?? colorScheme.onSurfaceVariant;
+    final resolvedActiveTextColor = activeTextColor ?? colorScheme.onPrimary;
+    final resolvedChipBorderColor =
+        chipBorderColor ?? colorScheme.outlineVariant;
+
     return SizedBox(
       height: 62,
       child: ListView.separated(
@@ -47,9 +56,11 @@ class NsfwScanWizardStepHeader extends StatelessWidget {
           final done = isStepDone?.call(index) ?? (index < currentStep);
           final active = index == currentStep;
           final background = active
-              ? activeColor
-              : (done ? completedColor : idleColor);
-          final foreground = (active || done) ? activeTextColor : idleTextColor;
+              ? resolvedActiveColor
+              : (done ? resolvedCompletedColor : resolvedIdleColor);
+          final foreground = (active || done)
+              ? resolvedActiveTextColor
+              : resolvedIdleTextColor;
 
           return AnimatedContainer(
             duration: const Duration(milliseconds: 140),
@@ -57,7 +68,7 @@ class NsfwScanWizardStepHeader extends StatelessWidget {
             decoration: BoxDecoration(
               color: background,
               borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: chipBorderColor),
+              border: Border.all(color: resolvedChipBorderColor),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -105,8 +116,8 @@ class NsfwBottomActionBar extends StatelessWidget {
     this.restartLabel = 'Von vorne starten',
     this.cancelLabel = 'Abbrechen',
     this.padding = const EdgeInsets.fromLTRB(12, 8, 12, 12),
-    this.backgroundColor = Colors.white,
-    this.shadowColor = const Color(0x22000000),
+    this.backgroundColor,
+    this.shadowColor,
   });
 
   final bool showWizardControls;
@@ -123,20 +134,24 @@ class NsfwBottomActionBar extends StatelessWidget {
   final String restartLabel;
   final String cancelLabel;
   final EdgeInsets padding;
-  final Color backgroundColor;
-  final Color shadowColor;
+  final Color? backgroundColor;
+  final Color? shadowColor;
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final resolvedBackgroundColor = backgroundColor ?? colorScheme.surface;
+    final resolvedShadowColor = shadowColor ?? Theme.of(context).shadowColor;
+
     return SafeArea(
       top: false,
       child: Container(
         padding: padding,
         decoration: BoxDecoration(
-          color: backgroundColor,
+          color: resolvedBackgroundColor,
           boxShadow: [
             BoxShadow(
-              color: shadowColor,
+              color: resolvedShadowColor.withValues(alpha: 0.14),
               blurRadius: 10,
               offset: const Offset(0, -2),
             ),
@@ -241,7 +256,7 @@ class NsfwBatchProgressCard extends StatelessWidget {
     this.running = false,
     this.completed = false,
     this.titleBuilder,
-    this.cardColor = Colors.white,
+    this.cardColor,
     this.progressColor,
     this.padding = const EdgeInsets.all(12),
   });
@@ -254,7 +269,7 @@ class NsfwBatchProgressCard extends StatelessWidget {
   final bool running;
   final bool completed;
   final String Function(bool running, bool completed)? titleBuilder;
-  final Color cardColor;
+  final Color? cardColor;
   final Color? progressColor;
   final EdgeInsets padding;
 
@@ -298,13 +313,13 @@ class NsfwGalleryLoadCard extends StatelessWidget {
     super.key,
     required this.progress,
     this.title = 'Galerie laden',
-    this.cardColor = Colors.white,
+    this.cardColor,
     this.padding = const EdgeInsets.all(12),
   });
 
   final NsfwGalleryLoadProgress progress;
   final String title;
-  final Color cardColor;
+  final Color? cardColor;
   final EdgeInsets padding;
 
   @override
@@ -343,9 +358,9 @@ class NsfwResultStatusChip extends StatelessWidget {
     this.errorLabel = 'Fehler',
     this.nsfwLabel = 'NSFW',
     this.safeLabel = 'Safe',
-    this.errorColor = Colors.red,
-    this.nsfwColor = Colors.orange,
-    this.safeColor = Colors.green,
+    this.errorColor,
+    this.nsfwColor,
+    this.safeColor,
   });
 
   final bool isNsfw;
@@ -353,14 +368,21 @@ class NsfwResultStatusChip extends StatelessWidget {
   final String errorLabel;
   final String nsfwLabel;
   final String safeLabel;
-  final Color errorColor;
-  final Color nsfwColor;
-  final Color safeColor;
+  final Color? errorColor;
+  final Color? nsfwColor;
+  final Color? safeColor;
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final resolvedErrorColor = errorColor ?? colorScheme.error;
+    final resolvedNsfwColor = nsfwColor ?? colorScheme.tertiary;
+    final resolvedSafeColor = safeColor ?? colorScheme.primary;
+
     final label = hasError ? errorLabel : (isNsfw ? nsfwLabel : safeLabel);
-    final color = hasError ? errorColor : (isNsfw ? nsfwColor : safeColor);
+    final color = hasError
+        ? resolvedErrorColor
+        : (isNsfw ? resolvedNsfwColor : resolvedSafeColor);
     final icon = hasError
         ? Icons.error_outline
         : (isNsfw ? Icons.warning_amber_rounded : Icons.verified);

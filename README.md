@@ -185,6 +185,26 @@ All widgets are optional and composable. They are not hard-wired into scan logic
 - Android: media read permissions (`READ_MEDIA_IMAGES`, `READ_MEDIA_VIDEO`, legacy fallback on older versions)
 - iOS: Photo Library usage descriptions
 
+## iOS CocoaPods note
+
+If your host app uses this plugin and CocoaPods fails with a static/transitive binary error related to TensorFlow Lite, set static linkage in your iOS `Podfile`:
+
+```ruby
+target 'Runner' do
+  use_frameworks! :linkage => :static
+  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+end
+```
+
+Then reinstall pods:
+
+```bash
+flutter clean
+rm -rf ios/Pods ios/Podfile.lock
+cd ios && pod repo update && pod install && cd ..
+flutter run
+```
+
 ## Example app
 
 See [example/README.md](example/README.md).

@@ -14,8 +14,8 @@ class NsfwMediaInput {
 
 class NsfwMediaBatchSettings {
   const NsfwMediaBatchSettings({
-    this.imageThreshold = 0.45,
-    this.videoThreshold = 0.45,
+    this.imageThreshold = 0.8,
+    this.videoThreshold = 0.8,
     this.videoSampleRateFps = 0.3,
     this.videoMaxFrames = 300,
     this.dynamicVideoSampleRate = true,

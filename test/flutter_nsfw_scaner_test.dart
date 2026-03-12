@@ -65,6 +65,9 @@ class MockFlutterNsfwScanerPlatform
     required String assetId,
     required bool includeOriginFileFallback,
   }) async {
+    if (assetId.toLowerCase().contains('fail')) {
+      throw const FormatException('PHPhotosErrorDomain Code=3164');
+    }
     return {
       'id': assetId,
       'type': assetId.toLowerCase().contains('video') ? 'video' : 'image',
@@ -425,67 +428,75 @@ void main() {
     await fakePlatform.close();
   });
 
-  test('scanMediaFromUrl scans image and does not persist local file by default', () async {
-    final fakePlatform = MockFlutterNsfwScanerPlatform();
-    FlutterNsfwScanerPlatform.instance = fakePlatform;
-    final plugin = FlutterNsfwScaner();
+  test(
+    'scanMediaFromUrl scans image and does not persist local file by default',
+    () async {
+      final fakePlatform = MockFlutterNsfwScanerPlatform();
+      FlutterNsfwScanerPlatform.instance = fakePlatform;
+      final plugin = FlutterNsfwScaner();
 
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    addTearDown(() async {
-      await server.close(force: true);
-    });
-    server.listen((request) async {
-      request.response.headers.contentType = ContentType('image', 'jpeg');
-      request.response.add(List<int>.filled(32, 7));
-      await request.response.close();
-    });
-    final url = 'http://${server.address.host}:${server.port}/image.jpg';
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() async {
+        await server.close(force: true);
+      });
+      server.listen((request) async {
+        request.response.headers.contentType = ContentType('image', 'jpeg');
+        request.response.add(List<int>.filled(32, 7));
+        await request.response.close();
+      });
+      final url = 'http://${server.address.host}:${server.port}/image.jpg';
 
-    final result = await plugin.scanMediaFromUrl(mediaUrl: url);
-    expect(result.type, NsfwMediaType.image);
-    expect(result.path, url);
-    expect(result.imageResult, isNotNull);
-    expect(result.imageResult!.imagePath, url);
+      final result = await plugin.scanMediaFromUrl(mediaUrl: url);
+      expect(result.type, NsfwMediaType.image);
+      expect(result.path, url);
+      expect(result.imageResult, isNotNull);
+      expect(result.imageResult!.imagePath, url);
 
-    await fakePlatform.close();
-  });
+      await fakePlatform.close();
+    },
+  );
 
-  test('scanMediaFromUrl scans image and persists file when requested', () async {
-    final fakePlatform = MockFlutterNsfwScanerPlatform();
-    FlutterNsfwScanerPlatform.instance = fakePlatform;
-    final plugin = FlutterNsfwScaner();
+  test(
+    'scanMediaFromUrl scans image and persists file when requested',
+    () async {
+      final fakePlatform = MockFlutterNsfwScanerPlatform();
+      FlutterNsfwScanerPlatform.instance = fakePlatform;
+      final plugin = FlutterNsfwScaner();
 
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    addTearDown(() async {
-      await server.close(force: true);
-    });
-    server.listen((request) async {
-      request.response.headers.contentType = ContentType('image', 'jpeg');
-      request.response.add(List<int>.filled(64, 11));
-      await request.response.close();
-    });
-    final targetDir = await Directory.systemTemp.createTemp('nsfw_url_scan_test_');
-    addTearDown(() async {
-      if (await targetDir.exists()) {
-        await targetDir.delete(recursive: true);
-      }
-    });
-    final url = 'http://${server.address.host}:${server.port}/keep.jpg';
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() async {
+        await server.close(force: true);
+      });
+      server.listen((request) async {
+        request.response.headers.contentType = ContentType('image', 'jpeg');
+        request.response.add(List<int>.filled(64, 11));
+        await request.response.close();
+      });
+      final targetDir = await Directory.systemTemp.createTemp(
+        'nsfw_url_scan_test_',
+      );
+      addTearDown(() async {
+        if (await targetDir.exists()) {
+          await targetDir.delete(recursive: true);
+        }
+      });
+      final url = 'http://${server.address.host}:${server.port}/keep.jpg';
 
-    final result = await plugin.scanMediaFromUrl(
-      mediaUrl: url,
-      saveDownloadedFile: true,
-      saveDirectoryPath: targetDir.path,
-      fileName: 'saved_image.jpg',
-    );
+      final result = await plugin.scanMediaFromUrl(
+        mediaUrl: url,
+        saveDownloadedFile: true,
+        saveDirectoryPath: targetDir.path,
+        fileName: 'saved_image.jpg',
+      );
 
-    expect(result.type, NsfwMediaType.image);
-    final savedPath = result.imageResult!.imagePath;
-    expect(savedPath.startsWith(targetDir.path), isTrue);
-    expect(await File(savedPath).exists(), isTrue);
+      expect(result.type, NsfwMediaType.image);
+      final savedPath = result.imageResult!.imagePath;
+      expect(savedPath.startsWith(targetDir.path), isTrue);
+      expect(await File(savedPath).exists(), isTrue);
 
-    await fakePlatform.close();
-  });
+      await fakePlatform.close();
+    },
+  );
 
   test('scanMediaBatch scans mixed media with settings', () async {
     final fakePlatform = MockFlutterNsfwScanerPlatform();
@@ -559,6 +570,46 @@ void main() {
 
     expect(result.processed, 2);
     expect(result.items, hasLength(2));
+
+    await fakePlatform.close();
+  });
+
+  test('scanMultipleMedia skips failing assetRefs and continues', () async {
+    final fakePlatform = MockFlutterNsfwScanerPlatform();
+    FlutterNsfwScanerPlatform.instance = fakePlatform;
+    final plugin = FlutterNsfwScaner();
+
+    final result = await plugin.scanMultipleMedia(
+      pickIfEmpty: false,
+      assetRefs: const [
+        NsfwAssetRef(
+          id: 'ok-image-1',
+          type: NsfwMediaType.image,
+          width: 100,
+          height: 100,
+          durationSeconds: 0,
+          createDateSecond: 1,
+          modifiedDateSecond: 1,
+        ),
+        NsfwAssetRef(
+          id: 'fail-image-2',
+          type: NsfwMediaType.image,
+          width: 100,
+          height: 100,
+          durationSeconds: 0,
+          createDateSecond: 1,
+          modifiedDateSecond: 1,
+        ),
+      ],
+    );
+
+    expect(result.processed, 2);
+    expect(result.successCount, 1);
+    expect(result.errorCount, 1);
+    expect(
+      result.items.where((item) => item.hasError).single.error,
+      contains('Asset-Auflosung fehlgeschlagen'),
+    );
 
     await fakePlatform.close();
   });

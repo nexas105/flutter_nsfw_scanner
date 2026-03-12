@@ -93,7 +93,7 @@ class FlutterNsfwScaner {
 
   Future<NsfwScanResult> scanImage({
     required String imagePath,
-    double threshold = 0.45,
+    double threshold = 0.8,
   }) async {
     final map = await _platform.scanImage(
       imagePath: imagePath,
@@ -111,7 +111,7 @@ class FlutterNsfwScaner {
 
   Future<List<NsfwScanResult>> scanBatch({
     required List<String> imagePaths,
-    double threshold = 0.45,
+    double threshold = 0.8,
     int maxConcurrency = 2,
     void Function(NsfwScanProgress progress)? onProgress,
   }) async {
@@ -169,7 +169,7 @@ class FlutterNsfwScaner {
 
   Future<NsfwVideoScanResult> scanVideo({
     required String videoPath,
-    double threshold = 0.45,
+    double threshold = 0.8,
     double sampleRateFps = 0.3,
     int maxFrames = 300,
     bool dynamicSampleRate = true,
@@ -1300,30 +1300,58 @@ class FlutterNsfwScaner {
       ...effectiveImagePaths.map(NsfwMediaInput.image),
       ...effectiveVideoPaths.map(NsfwMediaInput.video),
     ];
+    final preflightErrors = <NsfwMediaBatchItemResult>[];
     if (assetRefs.isNotEmpty) {
-      final resolved = await _resolveAssetRefs(
+      final resolvedOutcomes = await _resolveAssetRefs(
         assetRefs,
         resolveConcurrency: resolveConcurrency,
         includeOriginFileFallback: includeOriginFileFallback,
       );
-      media.addAll(resolved.map((item) => item.toMediaInput()));
+      media.addAll(
+        resolvedOutcomes
+            .where((item) => item.loaded != null)
+            .map((item) => item.loaded!.toMediaInput()),
+      );
+      preflightErrors.addAll(
+        resolvedOutcomes
+            .where((item) => item.error != null)
+            .map(
+              (item) => NsfwMediaBatchItemResult(
+                path: 'ph://${item.ref.id}',
+                type: item.ref.type,
+                assetId: item.ref.id,
+                uri: 'ph://${item.ref.id}',
+                error: item.error,
+              ),
+            ),
+      );
     }
     if (media.isEmpty) {
-      return const NsfwMediaBatchResult(
-        items: [],
-        processed: 0,
+      return NsfwMediaBatchResult(
+        items: preflightErrors,
+        processed: preflightErrors.length,
         successCount: 0,
-        errorCount: 0,
+        errorCount: preflightErrors.length,
         flaggedCount: 0,
       );
     }
 
-    return scanMediaInChunks(
+    final scanned = await scanMediaInChunks(
       media: media,
       settings: settings,
       chunkSize: chunkSize,
       includeCleanResults: includeCleanResults,
       onProgress: onProgress,
+    );
+    if (preflightErrors.isEmpty) {
+      return scanned;
+    }
+    return NsfwMediaBatchResult(
+      items: [...preflightErrors, ...scanned.items],
+      processed: scanned.processed + preflightErrors.length,
+      successCount: scanned.successCount,
+      errorCount: scanned.errorCount + preflightErrors.length,
+      flaggedCount: scanned.flaggedCount,
     );
   }
 
@@ -1380,7 +1408,7 @@ class FlutterNsfwScaner {
     );
   }
 
-  Future<List<NsfwLoadedAsset>> _resolveAssetRefs(
+  Future<List<_AssetResolveOutcome>> _resolveAssetRefs(
     List<NsfwAssetRef> refs, {
     required int resolveConcurrency,
     required bool includeOriginFileFallback,
@@ -1389,31 +1417,40 @@ class FlutterNsfwScaner {
       return const [];
     }
     final safeConcurrency = resolveConcurrency.clamp(1, 12);
-    final resolved = <NsfwLoadedAsset>[];
+    final outcomes = <_AssetResolveOutcome>[];
     var cursor = 0;
     while (cursor < refs.length) {
       final end = math.min(cursor + safeConcurrency, refs.length);
       final chunk = refs.sublist(cursor, end);
       final chunkResults = await Future.wait(
         chunk.map((ref) async {
-          final loaded = await loadAsset(
-            assetId: ref.id,
-            allowImages: ref.isImage,
-            allowVideos: ref.isVideo,
-            includeOriginFileFallback: includeOriginFileFallback,
-          );
-          return loaded;
+          try {
+            final loaded = await loadAsset(
+              assetId: ref.id,
+              allowImages: ref.isImage,
+              allowVideos: ref.isVideo,
+              includeOriginFileFallback: includeOriginFileFallback,
+            );
+            if (loaded == null) {
+              return _AssetResolveOutcome(
+                ref: ref,
+                error: 'Asset konnte nicht aufgelost werden.',
+              );
+            }
+            return _AssetResolveOutcome(ref: ref, loaded: loaded);
+          } catch (error) {
+            return _AssetResolveOutcome(
+              ref: ref,
+              error: 'Asset-Auflosung fehlgeschlagen: $error',
+            );
+          }
         }),
       );
-      for (final loaded in chunkResults) {
-        if (loaded != null) {
-          resolved.add(loaded);
-        }
-      }
+      outcomes.addAll(chunkResults);
       cursor = end;
       await Future<void>.delayed(Duration.zero);
     }
-    return resolved;
+    return outcomes;
   }
 
   Future<_DownloadedMedia> _downloadMediaFromUrl({
@@ -1517,6 +1554,14 @@ class _DownloadedMedia {
 
   final File file;
   final NsfwMediaType type;
+}
+
+class _AssetResolveOutcome {
+  const _AssetResolveOutcome({required this.ref, this.loaded, this.error});
+
+  final NsfwAssetRef ref;
+  final NsfwLoadedAsset? loaded;
+  final String? error;
 }
 
 NsfwMediaType _inferMediaType({required String path, String? mimeType}) {

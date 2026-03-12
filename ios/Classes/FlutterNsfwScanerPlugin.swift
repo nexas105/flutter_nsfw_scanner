@@ -777,20 +777,123 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
   }
 
   private func resolveImageAssetPath(asset: PHAsset) throws -> String {
+    if let directPath = try resolveImageAssetPathUsingImageData(asset: asset) {
+      return directPath
+    }
+    if let resourcePath = try resolveImageAssetPathUsingResourceDownload(asset: asset) {
+      return resourcePath
+    }
+    if let renderedPath = try resolveImageAssetPathUsingRenderedImage(asset: asset) {
+      return renderedPath
+    }
+    throw ScannerError.invalidArgument(
+      "Unable to read image data for asset \(asset.localIdentifier). The asset may be unavailable, cloud-only, or restricted."
+    )
+  }
+
+  private func resolveImageAssetPathUsingImageData(asset: PHAsset) throws -> String? {
     let options = PHImageRequestOptions()
-    options.isSynchronous = true
+    options.deliveryMode = .highQualityFormat
+    options.resizeMode = .none
+    options.isSynchronous = false
     options.isNetworkAccessAllowed = true
     options.version = .current
+
+    let semaphore = DispatchSemaphore(value: 0)
     var resolvedData: Data?
     PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
       resolvedData = data
+      semaphore.signal()
     }
-    guard let data = resolvedData else {
-      throw ScannerError.invalidArgument("Unable to read image data for asset \(asset.localIdentifier)")
+    semaphore.wait()
+
+    guard let resolvedData, !resolvedData.isEmpty else {
+      return nil
     }
+    return try writeAssetDataToTemp(data: resolvedData, preferredExtension: "jpg")
+  }
+
+  private func resolveImageAssetPathUsingResourceDownload(asset: PHAsset) throws -> String? {
+    let resources = PHAssetResource.assetResources(for: asset)
+    guard let resource = resources.first(where: { $0.type == .photo || $0.type == .fullSizePhoto }) ?? resources.first else {
+      return nil
+    }
+
+    let options = PHAssetResourceRequestOptions()
+    options.isNetworkAccessAllowed = true
+
+    let semaphore = DispatchSemaphore(value: 0)
+    var collectedData = Data()
+    PHAssetResourceManager.default().requestData(
+      for: resource,
+      options: options,
+      dataReceivedHandler: { chunk in
+        collectedData.append(chunk)
+      },
+      completionHandler: { _ in
+        semaphore.signal()
+      }
+    )
+    semaphore.wait()
+
+    guard !collectedData.isEmpty else {
+      return nil
+    }
+
+    let ext = (resource.originalFilename as NSString).pathExtension
+    return try writeAssetDataToTemp(
+      data: collectedData,
+      preferredExtension: ext.isEmpty ? "jpg" : ext
+    )
+  }
+
+  private func resolveImageAssetPathUsingRenderedImage(asset: PHAsset) throws -> String? {
+    let options = PHImageRequestOptions()
+    options.deliveryMode = .highQualityFormat
+    options.resizeMode = .exact
+    options.isSynchronous = false
+    options.isNetworkAccessAllowed = true
+    options.version = .current
+
+    let targetWidth = max(64, min(asset.pixelWidth, 4096))
+    let targetHeight = max(64, min(asset.pixelHeight, 4096))
+
+    let semaphore = DispatchSemaphore(value: 0)
+    var requestedImage: UIImage?
+
+    PHImageManager.default().requestImage(
+      for: asset,
+      targetSize: CGSize(width: targetWidth, height: targetHeight),
+      contentMode: .aspectFit,
+      options: options
+    ) { image, info in
+      let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+      if let image, !degraded {
+        requestedImage = image
+      } else if requestedImage == nil, let image {
+        requestedImage = image
+      }
+      let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+      if !degraded || cancelled {
+        semaphore.signal()
+      }
+    }
+    semaphore.wait()
+
+    guard let image = requestedImage,
+          let data = image.jpegData(compressionQuality: 1.0),
+          !data.isEmpty else {
+      return nil
+    }
+    return try writeAssetDataToTemp(data: data, preferredExtension: "jpg")
+  }
+
+  private func writeAssetDataToTemp(data: Data, preferredExtension: String) throws -> String {
     let outDir = FileManager.default.temporaryDirectory.appendingPathComponent("asset_cache", isDirectory: true)
     try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
-    let out = outDir.appendingPathComponent("asset_\(UUID().uuidString).jpg")
+    let normalizedExt = preferredExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+    let ext = normalizedExt.isEmpty ? "jpg" : normalizedExt
+    let out = outDir.appendingPathComponent("asset_\(UUID().uuidString).\(ext)")
     try data.write(to: out, options: .atomic)
     return out.path
   }
@@ -806,7 +909,13 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
     let out = outDir.appendingPathComponent("asset_\(UUID().uuidString).\(ext.isEmpty ? "mov" : ext)")
     let semaphore = DispatchSemaphore(value: 0)
     var writeError: Error?
-    PHAssetResourceManager.default().writeData(for: resource, toFile: out, options: nil) { error in
+    let requestOptions = PHAssetResourceRequestOptions()
+    requestOptions.isNetworkAccessAllowed = true
+    PHAssetResourceManager.default().writeData(
+      for: resource,
+      toFile: out,
+      options: requestOptions
+    ) { error in
       writeError = error
       semaphore.signal()
     }

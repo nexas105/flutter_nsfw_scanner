@@ -4,7 +4,7 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'flutter_nsfw_scaner'
-  s.version          = '0.2.0'
+  s.version          = '1.0.4'
   s.summary          = 'NSFW image scanning with TensorFlow Lite.'
   s.description      = <<-DESC
 NSFW image scanning with TensorFlow Lite.
@@ -14,6 +14,7 @@ NSFW image scanning with TensorFlow Lite.
   s.author           = { 'Your Company' => 'email@example.com' }
   s.source           = { :path => '.' }
   s.source_files = 'Classes/**/*'
+  s.static_framework = true
   s.dependency 'Flutter'
   s.dependency 'TensorFlowLiteSwift', '~> 2.14.0'
   s.platform = :ios, '13.0'
