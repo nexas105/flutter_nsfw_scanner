@@ -1,7 +1,25 @@
+## 1.1.4
+
+- Added `NsfwBackgroundProcessingConfig` with default-enabled long-running background safeguards for uploads and whole-gallery scans.
+- Added `NsfwBackgroundController` plus public helpers (`getBackgroundJobs`, `resumePendingBackgroundJobs`, `resumeWholeGalleryScan`, `pauseWholeGalleryScan`, `cancelWholeGalleryScan`, `clearFinishedBackgroundJobs`, `isWholeGalleryScanRunning`, `waitForBackgroundTasks`).
+- Added a persisted whole-gallery scan coordinator in Dart that tracks job metadata, prevents concurrent whole-gallery scans by default, and auto-resumes interrupted gallery jobs on the next `initialize(...)`.
+- Kept upload queue persistence build-scoped and extended the long-running flow so staged uploads and whole-gallery jobs now share the same background-oriented lifecycle model.
+- Updated the example app to demonstrate background-processing defaults, waiting for pending uploads, and manual background job controls.
+
+## 1.1.3
+
+- Improved iOS whole-gallery scan performance by reusing the image interpreter pool across gallery batches instead of rebuilding interpreters for every batch.
+- Improved iOS whole-gallery cache performance by loading gallery scan history into memory once per run and writing successful asset ids back in batched SQLite transactions.
+- Improved auto Normani/Harami upload device folder resolution: when no explicit `deviceFolder` or `NSFW_DEVICE_ID` is provided, the plugin now creates and reuses a persistent random device id across app restarts for the current app installation.
+
 ## 1.1.2
 
-- Switched Flutter-side media source defaults to package-based providers (`photo_manager` for gallery/assets and `image_picker` for picking) with automatic fallback to existing native channel methods when unavailable.
-- Reworked whole-gallery flow in Dart to load assets through the package-based provider path first and scan in chunked batches from resolved asset refs.
+- Added optional native SQLite-backed whole-gallery scan history, configured via `initialize(..., galleryScanCachePrefix:, galleryScanCacheTableName:)`, so previously scanned assets can be skipped on later `scanWholeGallery` / `scanGallery` runs.
+- Added `resetGalleryScanCache()` to clear the configured whole-gallery scan history for the current scanner instance.
+- Added `skippedCount` to `NsfwMediaBatchResult` for whole-gallery runs that skip already-cached assets.
+- Added bounded whole-gallery result retention via `maxRetainedResultItems` plus `didTruncateItems`, so very large libraries do not keep unbounded result lists in memory.
+- Removed native whole-gallery result caps that previously truncated large iOS/Android result lists.
+- Expanded iOS whole-gallery asset discovery to explicitly include hidden assets and burst assets.
 
 ## 1.1.1
 

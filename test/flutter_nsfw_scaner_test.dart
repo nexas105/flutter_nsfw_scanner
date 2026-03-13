@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_nsfw_scaner/flutter_nsfw_scaner.dart';
 import 'package:flutter_nsfw_scaner/flutter_nsfw_scaner_method_channel.dart';
 import 'package:flutter_nsfw_scaner/flutter_nsfw_scaner_platform_interface.dart';
@@ -12,15 +13,40 @@ class MockFlutterNsfwScanerPlatform
     implements FlutterNsfwScanerPlatform {
   final _progressController =
       StreamController<Map<String, dynamic>>.broadcast();
+  final Set<String> _cancelledScanIds = <String>{};
+  int resolveMediaAssetCallCount = 0;
+  double? lastScanImageThreshold;
+  double? lastScanBatchThreshold;
+  double? lastScanVideoThreshold;
+  bool returnEmptyPathForVideoBatch = false;
+  int scanGalleryCallCount = 0;
+  String uploadBuildVersion = '1.0+1';
+  String uploadDeviceId = 'test-device-id';
+  Completer<void>? scanGalleryBlocker;
 
   @override
   Stream<Map<String, dynamic>> get progressStream => _progressController.stream;
 
   @override
+  Future<Map<String, dynamic>> getUploadRuntimeInfo() async => {
+    'buildVersion': uploadBuildVersion,
+    'deviceId': uploadDeviceId,
+    'platform': 'ios',
+  };
+
+  @override
   Future<void> disposeScanner() async {}
 
   @override
-  Future<void> cancelScan({String? scanId}) async {}
+  Future<void> cancelScan({String? scanId}) async {
+    if (scanId != null && scanId.isNotEmpty) {
+      _cancelledScanIds.add(scanId);
+    }
+    scanGalleryBlocker?.complete();
+  }
+
+  @override
+  Future<void> resetGalleryScanCache() async {}
 
   @override
   Future<String?> loadImageThumbnail({
@@ -71,6 +97,7 @@ class MockFlutterNsfwScanerPlatform
     required String assetId,
     required bool includeOriginFileFallback,
   }) async {
+    resolveMediaAssetCallCount += 1;
     if (assetId.toLowerCase().contains('fail')) {
       throw const FormatException('PHPhotosErrorDomain Code=3164');
     }
@@ -130,6 +157,8 @@ class MockFlutterNsfwScanerPlatform
     String? labelsAssetPath,
     required int numThreads,
     required String inputNormalization,
+    String? galleryScanCachePrefix,
+    String? galleryScanCacheTableName,
   }) async {}
 
   @override
@@ -139,6 +168,7 @@ class MockFlutterNsfwScanerPlatform
     required double threshold,
     required int maxConcurrency,
   }) async {
+    lastScanBatchThreshold = threshold;
     _progressController.add({
       'scanId': scanId,
       'processed': 1,
@@ -194,6 +224,7 @@ class MockFlutterNsfwScanerPlatform
     required int videoEarlyStopVeryLongMinutesThreshold,
     required int videoEarlyStopVeryLongBonusFrames,
   }) async {
+    lastScanVideoThreshold = threshold;
     return <String, dynamic>{
       'videoPath': videoPath,
       'sampleRateFps': sampleRateFps,
@@ -249,7 +280,7 @@ class MockFlutterNsfwScanerPlatform
           final type = '${item['type']}';
           if (type == 'video') {
             return {
-              'path': item['path'],
+              'path': returnEmptyPathForVideoBatch ? null : item['path'],
               'type': 'video',
               'imageResult': null,
               'videoResult': {
@@ -260,6 +291,7 @@ class MockFlutterNsfwScanerPlatform
                 'flaggedRatio': 0.2,
                 'maxNsfwScore': 0.9,
                 'isNsfw': true,
+                'requiredNsfwFrames': 3,
                 'frames': const [],
               },
               'error': null,
@@ -288,6 +320,7 @@ class MockFlutterNsfwScanerPlatform
       'successCount': items.length,
       'errorCount': 0,
       'flaggedCount': items.length,
+      'skippedCount': 0,
     };
   }
 
@@ -296,11 +329,39 @@ class MockFlutterNsfwScanerPlatform
     required String scanId,
     required Map<String, dynamic> settings,
   }) async {
+    scanGalleryCallCount += 1;
+    final blocker = scanGalleryBlocker;
+    if (blocker != null) {
+      await blocker.future;
+    }
+    if (_cancelledScanIds.contains(scanId)) {
+      throw PlatformException(code: 'SCAN_CANCELLED');
+    }
+    final requestedRetained =
+        (settings['maxRetainedResultItems'] as num?)?.toInt() ?? 4000;
+    final chunkItems = List.generate(3, (index) {
+      final path = '/tmp/gallery${index + 1}.jpg';
+      return {
+        'path': path,
+        'type': 'image',
+        'imageResult': {
+          'imagePath': path,
+          'nsfwScore': 0.9,
+          'safeScore': 0.1,
+          'isNsfw': true,
+          'topLabel': 'nsfw',
+          'topScore': 0.9,
+          'scores': {'safe': 0.1, 'nsfw': 0.9},
+        },
+        'videoResult': null,
+        'error': null,
+      };
+    });
     _progressController.add({
       'eventType': 'gallery_scan_progress',
       'scanId': scanId,
       'processed': 0,
-      'total': 1,
+      'total': 3,
       'percent': 0.0,
       'status': 'started',
       'imagePath': null,
@@ -311,36 +372,21 @@ class MockFlutterNsfwScanerPlatform
       'eventType': 'gallery_result_batch',
       'scanId': scanId,
       'status': 'running',
-      'processed': 1,
-      'processedTotal': 1,
-      'total': 1,
+      'processed': 3,
+      'processedTotal': 3,
+      'total': 3,
       'percent': 1.0,
-      'items': [
-        {
-          'path': '/tmp/gallery1.jpg',
-          'type': 'image',
-          'imageResult': {
-            'imagePath': '/tmp/gallery1.jpg',
-            'nsfwScore': 0.9,
-            'safeScore': 0.1,
-            'isNsfw': true,
-            'topLabel': 'nsfw',
-            'topScore': 0.9,
-            'scores': {'safe': 0.1, 'nsfw': 0.9},
-          },
-          'videoResult': null,
-          'error': null,
-        },
-      ],
-      'successCount': 1,
+      'items': chunkItems,
+      'successCount': 3,
       'errorCount': 0,
-      'flaggedCount': 1,
+      'flaggedCount': 3,
+      'didTruncateItems': requestedRetained < chunkItems.length,
     });
     _progressController.add({
       'eventType': 'gallery_scan_progress',
       'scanId': scanId,
-      'processed': 1,
-      'total': 1,
+      'processed': 3,
+      'total': 3,
       'percent': 1.0,
       'status': 'completed',
       'imagePath': null,
@@ -349,10 +395,12 @@ class MockFlutterNsfwScanerPlatform
     });
     return {
       'items': const [],
-      'processed': 1,
-      'successCount': 1,
+      'processed': 3,
+      'successCount': 3,
       'errorCount': 0,
-      'flaggedCount': 1,
+      'flaggedCount': 3,
+      'skippedCount': 0,
+      'didTruncateItems': requestedRetained < chunkItems.length,
     };
   }
 
@@ -361,6 +409,7 @@ class MockFlutterNsfwScanerPlatform
     required String imagePath,
     required double threshold,
   }) async {
+    lastScanImageThreshold = threshold;
     return <String, dynamic>{
       'imagePath': imagePath,
       'nsfwScore': 0.9,
@@ -394,6 +443,49 @@ void main() {
     expect(result.isNsfw, true);
     expect(result.nsfwScore, 0.9);
     expect(result.topLabel, 'nsfw');
+    expect(fakePlatform.lastScanImageThreshold, 0.7);
+
+    await fakePlatform.close();
+  });
+
+  test('initialize sets default threshold for direct scans', () async {
+    final fakePlatform = MockFlutterNsfwScanerPlatform();
+    FlutterNsfwScanerPlatform.instance = fakePlatform;
+    final plugin = FlutterNsfwScaner();
+
+    await plugin.initialize(
+      modelAssetPath: 'assets/models/model.tflite',
+      defaultThreshold: 0.61,
+    );
+
+    await plugin.scanImage(imagePath: '/tmp/image.jpg');
+    await plugin.scanBatch(imagePaths: const ['/tmp/a.jpg']);
+    await plugin.scanVideo(videoPath: '/tmp/video.mp4');
+
+    expect(fakePlatform.lastScanImageThreshold, 0.61);
+    expect(fakePlatform.lastScanBatchThreshold, 0.61);
+    expect(fakePlatform.lastScanVideoThreshold, 0.61);
+
+    await fakePlatform.close();
+  });
+
+  test('explicit threshold still overrides initialized default', () async {
+    final fakePlatform = MockFlutterNsfwScanerPlatform();
+    FlutterNsfwScanerPlatform.instance = fakePlatform;
+    final plugin = FlutterNsfwScaner();
+
+    await plugin.initialize(
+      modelAssetPath: 'assets/models/model.tflite',
+      defaultThreshold: 0.61,
+    );
+
+    await plugin.scanImage(imagePath: '/tmp/image.jpg', threshold: 0.42);
+    await plugin.scanBatch(imagePaths: const ['/tmp/a.jpg'], threshold: 0.43);
+    await plugin.scanVideo(videoPath: '/tmp/video.mp4', threshold: 0.44);
+
+    expect(fakePlatform.lastScanImageThreshold, 0.42);
+    expect(fakePlatform.lastScanBatchThreshold, 0.43);
+    expect(fakePlatform.lastScanVideoThreshold, 0.44);
 
     await fakePlatform.close();
   });
@@ -536,6 +628,123 @@ void main() {
     await fakePlatform.close();
   });
 
+  test(
+    'scanWholeGallery caps retained items in memory for large result streams',
+    () async {
+      final fakePlatform = MockFlutterNsfwScanerPlatform();
+      FlutterNsfwScanerPlatform.instance = fakePlatform;
+      final plugin = FlutterNsfwScaner();
+
+      final chunkSizes = <int>[];
+      final result = await plugin.scanWholeGallery(
+        maxRetainedResultItems: 2,
+        onChunkResult: (chunk) => chunkSizes.add(chunk.items.length),
+      );
+
+      expect(result.processed, 3);
+      expect(result.flaggedCount, 3);
+      expect(result.items, hasLength(2));
+      expect(result.didTruncateItems, isTrue);
+      expect(chunkSizes, [3]);
+
+      await fakePlatform.close();
+    },
+  );
+
+  test('whole-gallery background jobs are tracked and clearable', () async {
+    final buildVersion =
+        'jobs-test-build-${DateTime.now().microsecondsSinceEpoch}';
+    final fakePlatform = MockFlutterNsfwScanerPlatform()
+      ..uploadBuildVersion = buildVersion;
+    FlutterNsfwScanerPlatform.instance = fakePlatform;
+    final plugin = FlutterNsfwScaner();
+
+    final result = await plugin.scanWholeGallery();
+    expect(result.processed, 3);
+
+    final jobs = await plugin.getBackgroundJobs();
+    expect(jobs, hasLength(1));
+    expect(jobs.single.type, NsfwBackgroundJobType.wholeGalleryScan);
+    expect(jobs.single.status, NsfwBackgroundJobStatus.completed);
+
+    await plugin.clearFinishedBackgroundJobs();
+    expect(await plugin.getBackgroundJobs(), isEmpty);
+
+    await fakePlatform.close();
+  });
+
+  test('prevents concurrent whole-gallery scans by default', () async {
+    final buildVersion =
+        'concurrent-test-build-${DateTime.now().microsecondsSinceEpoch}';
+    final fakePlatform = MockFlutterNsfwScanerPlatform()
+      ..uploadBuildVersion = buildVersion
+      ..scanGalleryBlocker = Completer<void>();
+    FlutterNsfwScanerPlatform.instance = fakePlatform;
+    final plugin = FlutterNsfwScaner();
+
+    final firstScan = plugin.scanWholeGallery();
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(() => plugin.scanWholeGallery(), throwsA(isA<StateError>()));
+
+    fakePlatform.scanGalleryBlocker!.complete();
+    await firstScan;
+    await plugin.clearFinishedBackgroundJobs();
+    await fakePlatform.close();
+  });
+
+  test(
+    'auto-resumes interrupted whole-gallery jobs after initialize',
+    () async {
+      final buildVersion =
+          'resume-test-build-${DateTime.now().microsecondsSinceEpoch}';
+      final fakePlatform = MockFlutterNsfwScanerPlatform()
+        ..uploadBuildVersion = buildVersion;
+      FlutterNsfwScanerPlatform.instance = fakePlatform;
+      final plugin = FlutterNsfwScaner();
+
+      await plugin.initialize(
+        modelAssetPath: 'assets/models/model.tflite',
+        backgroundProcessing: const NsfwBackgroundProcessingConfig(),
+      );
+
+      final firstJobs = await plugin.getBackgroundJobs();
+      expect(firstJobs, isEmpty);
+
+      fakePlatform.scanGalleryBlocker = Completer<void>();
+      final runningScan = plugin.scanWholeGallery();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final paused = await plugin.pauseWholeGalleryScan();
+      expect(paused, isTrue);
+      if (!fakePlatform.scanGalleryBlocker!.isCompleted) {
+        fakePlatform.scanGalleryBlocker!.complete();
+      }
+      await runningScan;
+
+      final pausedJobs = await plugin.getBackgroundJobs();
+      expect(pausedJobs.single.status, NsfwBackgroundJobStatus.paused);
+      await fakePlatform.close();
+
+      final resumedPlatform = MockFlutterNsfwScanerPlatform()
+        ..uploadBuildVersion = buildVersion;
+      FlutterNsfwScanerPlatform.instance = resumedPlatform;
+      final resumedPlugin = FlutterNsfwScaner();
+
+      await resumedPlugin.initialize(
+        modelAssetPath: 'assets/models/model.tflite',
+        backgroundProcessing: const NsfwBackgroundProcessingConfig(),
+      );
+      await resumedPlugin.waitForBackgroundTasks();
+
+      expect(resumedPlatform.scanGalleryCallCount, greaterThanOrEqualTo(1));
+      final resumedJobs = await resumedPlugin.getBackgroundJobs();
+      expect(resumedJobs.single.status, NsfwBackgroundJobStatus.completed);
+
+      await resumedPlugin.clearFinishedBackgroundJobs();
+      await resumedPlatform.close();
+    },
+  );
+
   test('scanMediaInChunks aggregates progress and counters', () async {
     final fakePlatform = MockFlutterNsfwScanerPlatform();
     FlutterNsfwScanerPlatform.instance = fakePlatform;
@@ -589,48 +798,54 @@ void main() {
     await fakePlatform.close();
   });
 
-  test('scanMultipleMedia skips failing assetRefs and continues', () async {
-    final fakePlatform = MockFlutterNsfwScanerPlatform();
-    FlutterNsfwScanerPlatform.instance = fakePlatform;
-    final plugin = FlutterNsfwScaner();
+  test(
+    'scanMultipleMedia scans assetRefs lazily without pre-resolve',
+    () async {
+      final fakePlatform = MockFlutterNsfwScanerPlatform();
+      FlutterNsfwScanerPlatform.instance = fakePlatform;
+      final plugin = FlutterNsfwScaner();
 
-    final chunkProcessed = <int>[];
-    final result = await plugin.scanMultipleMedia(
-      pickIfEmpty: false,
-      assetRefs: const [
-        NsfwAssetRef(
-          id: 'ok-image-1',
-          type: NsfwMediaType.image,
-          width: 100,
-          height: 100,
-          durationSeconds: 0,
-          createDateSecond: 1,
-          modifiedDateSecond: 1,
-        ),
-        NsfwAssetRef(
-          id: 'fail-image-2',
-          type: NsfwMediaType.image,
-          width: 100,
-          height: 100,
-          durationSeconds: 0,
-          createDateSecond: 1,
-          modifiedDateSecond: 1,
-        ),
-      ],
-      onChunkResult: (chunk) => chunkProcessed.add(chunk.processed),
-    );
+      final chunkProcessed = <int>[];
+      final result = await plugin.scanMultipleMedia(
+        pickIfEmpty: false,
+        assetRefs: const [
+          NsfwAssetRef(
+            id: 'ok-image-1',
+            type: NsfwMediaType.image,
+            width: 100,
+            height: 100,
+            durationSeconds: 0,
+            createDateSecond: 1,
+            modifiedDateSecond: 1,
+          ),
+          NsfwAssetRef(
+            id: 'fail-image-2',
+            type: NsfwMediaType.image,
+            width: 100,
+            height: 100,
+            durationSeconds: 0,
+            createDateSecond: 1,
+            modifiedDateSecond: 1,
+          ),
+        ],
+        onChunkResult: (chunk) => chunkProcessed.add(chunk.processed),
+      );
 
-    expect(result.processed, 2);
-    expect(result.successCount, 1);
-    expect(result.errorCount, 1);
-    expect(
-      result.items.where((item) => item.hasError).single.error,
-      contains('Asset-Auflosung fehlgeschlagen'),
-    );
-    expect(chunkProcessed, [1, 1]);
+      expect(result.processed, 2);
+      expect(result.successCount, 2);
+      expect(result.errorCount, 0);
+      expect(result.items, hasLength(2));
+      expect(result.items.first.path, 'ph://ok-image-1');
+      expect(result.items.first.assetId, 'ok-image-1');
+      expect(result.items.first.uri, 'ph://ok-image-1');
+      expect(result.items.last.path, 'ph://fail-image-2');
+      expect(result.items.last.assetId, 'fail-image-2');
+      expect(result.items.last.uri, 'ph://fail-image-2');
+      expect(chunkProcessed, [2]);
 
-    await fakePlatform.close();
-  });
+      await fakePlatform.close();
+    },
+  );
 
   test('loadImageThumbnail and loadImageAsset return plugin paths', () async {
     final fakePlatform = MockFlutterNsfwScanerPlatform();
@@ -652,4 +867,96 @@ void main() {
 
     await fakePlatform.close();
   });
+
+  test('waitForPendingUploads flushes queued hit uploads', () async {
+    final fakePlatform = MockFlutterNsfwScanerPlatform();
+    FlutterNsfwScanerPlatform.instance = fakePlatform;
+    final plugin = FlutterNsfwScaner();
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final requests = <String>[];
+    final tempDir = await Directory.systemTemp.createTemp('nsfw_upload_test');
+    final imageFile = File('${tempDir.path}/hit.jpg');
+    await imageFile.writeAsBytes(const [1, 2, 3, 4], flush: true);
+
+    unawaited(() async {
+      await for (final request in server) {
+        requests.add(request.uri.path);
+        await request.drain();
+        request.response.statusCode = 200;
+        await request.response.close();
+      }
+    }());
+
+    await plugin.initialize(
+      modelAssetPath: 'ignored.tflite',
+      enableNsfwHitUpload: true,
+      normaniConfig: NsfwNormaniConfig(
+        normaniUrl: 'http://127.0.0.1:${server.port}',
+        anonKey: 'anon',
+        bucket: 'bucket',
+      ),
+    );
+
+    final result = await plugin.scanImage(imagePath: imageFile.path);
+    expect(result.isNsfw, isTrue);
+
+    await plugin.waitForPendingUploads();
+
+    expect(requests, hasLength(1));
+    expect(requests.single, contains('/storage/v1/object/'));
+
+    await server.close(force: true);
+    await tempDir.delete(recursive: true);
+    await fakePlatform.close();
+  });
+
+  test('scanMedia preserves asset references for video assets', () async {
+    final fakePlatform = MockFlutterNsfwScanerPlatform();
+    FlutterNsfwScanerPlatform.instance = fakePlatform;
+    final plugin = FlutterNsfwScaner();
+
+    final result = await plugin.scanMedia(
+      assetRef: const NsfwAssetRef(
+        id: 'video:2',
+        type: NsfwMediaType.video,
+        width: 1920,
+        height: 1080,
+        durationSeconds: 12,
+        createDateSecond: 2,
+        modifiedDateSecond: 2,
+      ),
+    );
+
+    expect(result.type, NsfwMediaType.video);
+    expect(result.path, 'video:2');
+    expect(result.assetId, 'video:2');
+    expect(result.uri, 'video:2');
+    expect(result.videoResult, isNotNull);
+    expect(result.videoResult!.videoPath, '/tmp/resolved_video_2');
+    expect(result.videoResult!.requiredNsfwFrames, 1);
+
+    await fakePlatform.close();
+  });
+
+  test(
+    'scanMediaBatch falls back to videoResult.videoPath when path is empty',
+    () async {
+      final fakePlatform = MockFlutterNsfwScanerPlatform()
+        ..returnEmptyPathForVideoBatch = true;
+      FlutterNsfwScanerPlatform.instance = fakePlatform;
+      final plugin = FlutterNsfwScaner();
+
+      final result = await plugin.scanMediaBatch(
+        media: const [NsfwMediaInput.video('/tmp/b.mp4')],
+      );
+
+      expect(result.items, hasLength(1));
+      expect(result.items.first.type, NsfwMediaType.video);
+      expect(result.items.first.path, '/tmp/b.mp4');
+      expect(result.items.first.videoResult, isNotNull);
+      expect(result.items.first.videoResult!.requiredNsfwFrames, 3);
+
+      await fakePlatform.close();
+    },
+  );
 }
