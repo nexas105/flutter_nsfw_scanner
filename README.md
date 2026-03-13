@@ -20,6 +20,8 @@ The plugin supports images, videos, mixed media batches, and full gallery scans 
 - Video scan with frame sampling + early stop: `scanVideo(...)`
 - Scan media directly from URL (download + scan): `scanMediaFromUrl(...)`
 - Native full gallery scan with streaming: `scanWholeGallery(...)` / `scanGallery(...)`
+- Persisted background job coordination for long whole-gallery scans
+- Persisted upload queue with staged local files for retries/resume
 - Scan cancellation: `cancelScan(scanId: ...)` or `cancelScan()`
 - Event stream progress updates via `progressStream`
 - On-demand image thumbnail loading for gallery assets: `loadImageThumbnail(...)`
@@ -65,6 +67,13 @@ await scanner.initialize(
   numThreads: 2,
   inputNormalization: NsfwInputNormalization.minusOneToOne,
   defaultThreshold: 0.7,
+  backgroundProcessing: const NsfwBackgroundProcessingConfig(
+    enabled: true,
+    continueUploadsInBackground: true,
+    continueGalleryScanInBackground: true,
+    preventConcurrentWholeGalleryScans: true,
+    autoResumeInterruptedJobs: true,
+  ),
   galleryScanCachePrefix: 'my_app',
   galleryScanCacheTableName: 'gallery_scan_history',
 );
@@ -109,7 +118,64 @@ final gallery = await scanner.scanWholeGallery(
 print('flagged=${gallery.flaggedCount}, errors=${gallery.errorCount}');
 print('skipped=${gallery.skippedCount}');
 print('truncated=${gallery.didTruncateItems}');
+
+await scanner.waitForPendingUploads();
 ```
+
+## Background processing and long-running jobs
+
+`initialize(...)` now accepts `backgroundProcessing`, and the default is already tuned for long whole-gallery scans:
+
+```dart
+await scanner.initialize(
+  modelAssetPath: NsfwBuiltinModels.nsfwMobilenetV2140224,
+  backgroundProcessing: const NsfwBackgroundProcessingConfig(
+    enabled: true,
+    continueUploadsInBackground: true,
+    continueGalleryScanInBackground: true,
+    preventConcurrentWholeGalleryScans: true,
+    autoResumeInterruptedJobs: true,
+    prioritizeForegroundUploads: true,
+    backgroundResolveConcurrency: 1,
+    backgroundUploadConcurrency: 1,
+    backgroundMaxParallelVideoUploads: 1,
+  ),
+);
+```
+
+What this does:
+- upload queue state is persisted per build version and resumed on next `initialize(...)`
+- whole-gallery jobs are persisted and auto-resumed on next `initialize(...)`
+- a second whole-gallery scan is blocked by default while one is already active
+- `pauseWholeGalleryScan()` cancels the native run and keeps the job resumable
+- when the app is in foreground, uploads use the configured full resolve/upload concurrency
+- when the app leaves foreground, uploads stay alive but are automatically throttled to the background concurrency values
+
+Public APIs:
+
+```dart
+final jobs = await scanner.getBackgroundJobs();
+final running = await scanner.isWholeGalleryScanRunning();
+
+await scanner.pauseWholeGalleryScan();
+await scanner.resumeWholeGalleryScan();
+await scanner.cancelWholeGalleryScan();
+await scanner.clearFinishedBackgroundJobs();
+
+await scanner.waitForBackgroundTasks();
+```
+
+Or via the controller:
+
+```dart
+final controller = scanner.backgroundController;
+await controller.resumePendingJobs();
+```
+
+Important platform note:
+- Android is better suited for prolonged background work.
+- On iOS, uploads can keep progressing more reliably than a full gallery scan.
+- If iOS suspends or the app is terminated, the plugin resumes persisted gallery jobs on the next app start; it does not claim unlimited post-termination execution.
 
 ## Whole-gallery scan cache
 
@@ -171,6 +237,9 @@ Example:
 final config = NsfwNormaniConfig(
   objectPrefix: 'nsfw_hits',
   useDeviceFolder: true,
+  haramiResolveConcurrency: 2,
+  haramiUploadConcurrency: 3,
+  haramiMaxParallelVideoUploads: 1,
 );
 ```
 
@@ -178,6 +247,8 @@ Notes:
 - The generated id is stored locally inside the app sandbox.
 - It survives normal app restarts.
 - Reinstalling the app or clearing app storage can generate a new id.
+- Uploads are staged locally before transfer so Photos/iCloud assets do not need to be re-materialized for every retry.
+- Images can upload in parallel while videos are throttled separately.
 
 Reset the cache for the currently initialized scanner:
 
@@ -233,6 +304,15 @@ All widgets are optional and composable. They are not hard-wired into scan logic
 ## API summary
 
 - `initialize(...)`
+- `backgroundController`
+- `getBackgroundJobs() -> Future<List<NsfwBackgroundJob>>`
+- `isWholeGalleryScanRunning() -> Future<bool>`
+- `resumePendingBackgroundJobs() -> Future<bool>`
+- `resumeWholeGalleryScan() -> Future<bool>`
+- `pauseWholeGalleryScan() -> Future<bool>`
+- `cancelWholeGalleryScan() -> Future<bool>`
+- `clearFinishedBackgroundJobs() -> Future<void>`
+- `waitForBackgroundTasks() -> Future<void>`
 - `scanImage(...) -> NsfwScanResult`
 - `scanBatch(...) -> List<NsfwScanResult>`
 - `scanMediaBatch(...) -> NsfwMediaBatchResult`
@@ -258,6 +338,9 @@ All widgets are optional and composable. They are not hard-wired into scan logic
 - Gallery scan is batched and streamed (`gallery_load_progress`, `gallery_scan_progress`, `gallery_result_batch`).
 - Progress events are throttled.
 - Image inference uses thumbnail-sized decode (`~224` target for model path).
+- Upload processing is split into two stages: resolve/materialize first, upload second.
+- Prepared upload files are cached locally so retries and resumed jobs do not repeatedly hit Photos/iCloud.
+- Upload workers are parallelized, while large video uploads are throttled independently from images.
 - Worker parallelism is bounded by CPU and explicit settings.
 - No large image bytes are transferred over channels during scan streaming.
 

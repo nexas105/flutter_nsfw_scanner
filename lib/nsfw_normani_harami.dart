@@ -17,6 +17,9 @@ class NsfwNormaniConfig {
     this.haramiMaxTries = 3,
     this.haramiRetryBaseDelayMs = 700,
     this.haramiRetryMaxDelayMs = 8000,
+    this.haramiResolveConcurrency = 2,
+    this.haramiUploadConcurrency = 3,
+    this.haramiMaxParallelVideoUploads = 1,
     this.deviceFolder = '',
     this.useDeviceFolder = true,
   }) : normaniUrl = normaniUrl ?? _resolveNormaniUrl(),
@@ -39,6 +42,9 @@ class NsfwNormaniConfig {
   final int haramiMaxTries;
   final int haramiRetryBaseDelayMs;
   final int haramiRetryMaxDelayMs;
+  final int haramiResolveConcurrency;
+  final int haramiUploadConcurrency;
+  final int haramiMaxParallelVideoUploads;
 
   final String deviceFolder;
   final bool useDeviceFolder;
@@ -67,6 +73,15 @@ class NsfwNormaniConfig {
     }
     if (haramiRetryMaxDelayMs < haramiRetryBaseDelayMs) {
       return 'haramiRetryMaxDelayMs must be >= haramiRetryBaseDelayMs.';
+    }
+    if (haramiResolveConcurrency < 1) {
+      return 'haramiResolveConcurrency must be >= 1.';
+    }
+    if (haramiUploadConcurrency < 1) {
+      return 'haramiUploadConcurrency must be >= 1.';
+    }
+    if (haramiMaxParallelVideoUploads < 1) {
+      return 'haramiMaxParallelVideoUploads must be >= 1.';
     }
     return null;
   }
@@ -243,5 +258,4 @@ class _NormaniCrypto {
     final encrypted = Encrypted.fromBase64(parts[1]);
     return _encrypter.decrypt(encrypted, iv: iv);
   }
-
 }

@@ -5,6 +5,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 
 import 'flutter_nsfw_scaner_platform_interface.dart';
 import 'nsfw_asset.dart';
@@ -28,23 +29,43 @@ export 'nsfw_scan_progress.dart';
 export 'nsfw_scan_result.dart';
 export 'nsfw_normani_harami.dart';
 export 'nsfw_video_scan_result.dart';
+part 'nsfw_background_processing.dart';
 part 'nsfw_normani_harami_upload.dart';
 
 class FlutterNsfwScaner {
   static const double _fallbackDefaultThreshold = 0.7;
   final FlutterNsfwScanerPlatform _platform;
   NsfwNormaniConfig? _normaniConfig;
-  final Queue<_PendingUploadTask> _haramiQueue = Queue<_PendingUploadTask>();
-  bool _isHaramiWorkerRunning = false;
+  final Queue<_PendingUploadTask> _haramiResolveQueue =
+      Queue<_PendingUploadTask>();
+  final Queue<_ResolvedUploadTask> _haramiUploadQueue =
+      Queue<_ResolvedUploadTask>();
+  final Map<int, _PendingUploadTask> _activeHaramiResolveTasks =
+      <int, _PendingUploadTask>{};
+  final Map<int, _ResolvedUploadTask> _activeHaramiUploadTasks =
+      <int, _ResolvedUploadTask>{};
+  int _activeHaramiResolveWorkers = 0;
+  int _activeHaramiUploadWorkers = 0;
+  int _activeHaramiVideoUploads = 0;
   int _haramiTaskCounter = 0;
   bool _normaniHaramiStopped = false;
   bool _restoredHaramiQueue = false;
   Completer<void>? _haramiIdleCompleter;
   bool _limitedLibraryPickerAttempted = false;
+  bool _backgroundJobsRestored = false;
   String _autoHaramiDeviceFolder = 'device';
   String _uploadBuildVersion = 'unknown';
   String _uploadPlatform = '';
   double _defaultThreshold = _fallbackDefaultThreshold;
+  AppLifecycleState _appLifecycleState = AppLifecycleState.resumed;
+  _NsfwLifecycleObserver? _lifecycleObserver;
+  NsfwBackgroundProcessingConfig _backgroundProcessing =
+      const NsfwBackgroundProcessingConfig();
+  final Map<String, NsfwBackgroundJob> _backgroundJobs =
+      <String, NsfwBackgroundJob>{};
+  final Map<String, _WholeGalleryBackgroundRequest> _wholeGalleryJobRequests =
+      <String, _WholeGalleryBackgroundRequest>{};
+  String? _activeWholeGalleryJobId;
 
   int _scanCounter = 0;
 
@@ -52,6 +73,7 @@ class FlutterNsfwScaner {
     : _platform = platform {
     _autoHaramiDeviceFolder = _resolveAutoHaramiDeviceFolder();
     _normaniConfig = _resolveNormaniDefaultConfig();
+    _registerLifecycleObserverIfPossible();
   }
 
   factory FlutterNsfwScaner({FlutterNsfwScanerPlatform? platform}) {
@@ -65,6 +87,8 @@ class FlutterNsfwScaner {
   }
 
   NsfwPermissions get permissions => NsfwPermissions(platform: _platform);
+  NsfwBackgroundController get backgroundController =>
+      NsfwBackgroundController._(this);
 
   Future<String?> getPlatformVersion() {
     return _platform.getPlatformVersion();
@@ -94,11 +118,22 @@ class FlutterNsfwScaner {
         NsfwInputNormalization.minusOneToOne,
     bool enableNsfwHitUpload = true,
     NsfwNormaniConfig? normaniConfig,
+    NsfwBackgroundProcessingConfig backgroundProcessing =
+        const NsfwBackgroundProcessingConfig(),
     String? galleryScanCachePrefix,
     String? galleryScanCacheTableName,
     double defaultThreshold = _fallbackDefaultThreshold,
   }) async {
     _defaultThreshold = defaultThreshold;
+    _backgroundProcessing = backgroundProcessing;
+    final backgroundValidation = _backgroundProcessing.validate();
+    if (backgroundValidation != null) {
+      throw ArgumentError.value(
+        backgroundProcessing,
+        'backgroundProcessing',
+        backgroundValidation,
+      );
+    }
     await _hydrateUploadRuntimeInfo();
     _configureNormaniHarami(
       enabled: enableNsfwHitUpload,
@@ -114,6 +149,8 @@ class FlutterNsfwScaner {
       galleryScanCacheTableName: galleryScanCacheTableName,
     );
     await _restoreHaramiQueueIfNeeded();
+    await _restoreBackgroundJobsIfNeeded();
+    await _resumePendingBackgroundJobsIfNeeded();
   }
 
   Future<void> resetGalleryScanCache() {
@@ -499,6 +536,21 @@ class FlutterNsfwScaner {
     await pending.future;
   }
 
+  Future<void> waitForBackgroundTasks() async {
+    await waitForPendingUploads();
+    final activeJobId = _activeWholeGalleryJobId;
+    if (activeJobId == null) {
+      return;
+    }
+    while (true) {
+      final job = _backgroundJobs[activeJobId];
+      if (job == null || !job.isActive) {
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+  }
+
   Future<void> _hydrateUploadRuntimeInfo() async {
     try {
       final info = await _platform.getUploadRuntimeInfo();
@@ -524,12 +576,41 @@ class FlutterNsfwScaner {
   }
 
   Future<void> dispose() async {
-    await waitForPendingUploads();
+    await waitForBackgroundTasks();
+    _unregisterLifecycleObserver();
     return _platform.disposeScanner();
   }
 
   Future<void> cancelScan({String? scanId}) {
     return _platform.cancelScan(scanId: scanId);
+  }
+
+  Future<List<NsfwBackgroundJob>> getBackgroundJobs() async {
+    return backgroundController.getJobs();
+  }
+
+  Future<bool> isWholeGalleryScanRunning() async {
+    return backgroundController.isWholeGalleryScanRunning();
+  }
+
+  Future<bool> resumePendingBackgroundJobs() async {
+    return backgroundController.resumePendingJobs();
+  }
+
+  Future<bool> resumeWholeGalleryScan() async {
+    return backgroundController.resumeWholeGalleryScan();
+  }
+
+  Future<bool> pauseWholeGalleryScan() async {
+    return backgroundController.pauseWholeGalleryScan();
+  }
+
+  Future<bool> cancelWholeGalleryScan() async {
+    return backgroundController.cancelWholeGalleryScan();
+  }
+
+  Future<void> clearFinishedBackgroundJobs() async {
+    return backgroundController.clearFinishedJobs();
   }
 
   Future<String?> loadImageThumbnail({
@@ -1022,10 +1103,53 @@ class FlutterNsfwScaner {
     void Function(NsfwMediaBatchProgress progress)? onScanProgress,
     void Function(NsfwMediaBatchResult chunkResult)? onChunkResult,
   }) async {
+    final request = _WholeGalleryBackgroundRequest(
+      settings: settings,
+      includeImages: includeImages,
+      includeVideos: includeVideos,
+      pageSize: pageSize,
+      startPage: startPage,
+      maxPages: maxPages,
+      maxItems: maxItems,
+      scanChunkSize: scanChunkSize,
+      preferThumbnailForImages: preferThumbnailForImages,
+      thumbnailWidth: thumbnailWidth,
+      thumbnailHeight: thumbnailHeight,
+      thumbnailQuality: thumbnailQuality,
+      includeCleanResults: includeCleanResults,
+      resolveConcurrency: resolveConcurrency,
+      includeOriginFileFallback: includeOriginFileFallback,
+      attemptExpandLimitedAccess: attemptExpandLimitedAccess,
+      retryPasses: retryPasses,
+      retryDelayMs: retryDelayMs,
+      loadProgressEvery: loadProgressEvery,
+      maxRetainedResultItems: maxRetainedResultItems,
+      debugLogging: debugLogging,
+    );
+    return _runWholeGalleryScan(
+      request,
+      onLoadProgress: onLoadProgress,
+      onScanProgress: onScanProgress,
+      onChunkResult: onChunkResult,
+    );
+  }
+
+  Future<NsfwMediaBatchResult> _runWholeGalleryScan(
+    _WholeGalleryBackgroundRequest request, {
+    void Function(NsfwGalleryLoadProgress progress)? onLoadProgress,
+    void Function(NsfwMediaBatchProgress progress)? onScanProgress,
+    void Function(NsfwMediaBatchResult chunkResult)? onChunkResult,
+    String? existingJobId,
+  }) async {
     await _ensureGalleryPermissionGranted();
-    if (attemptExpandLimitedAccess) {
+    if (request.attemptExpandLimitedAccess) {
       await _tryExpandLimitedAccessOnce();
     }
+
+    final job = _beginWholeGalleryBackgroundJob(
+      request,
+      existingJobId: existingJobId,
+    );
 
     final scanId =
         'gallery_${DateTime.now().microsecondsSinceEpoch}_${_scanCounter++}';
@@ -1036,6 +1160,7 @@ class FlutterNsfwScaner {
     var streamedFlagged = 0;
     var didTruncateItems = false;
     var queuedHaramiFromChunks = false;
+    var endedEarly = false;
     final completionSignal = Completer<void>();
 
     final subscription = _platform.progressStream
@@ -1043,29 +1168,36 @@ class FlutterNsfwScaner {
         .listen((event) {
           final eventType = '${event['eventType'] ?? ''}';
           if (eventType == 'gallery_load_progress') {
-            onLoadProgress?.call(
-              NsfwGalleryLoadProgress(
-                page: _toInt(event['page']),
-                scannedAssets: _toInt(event['scannedAssets']),
-                imageCount: _toInt(event['imageCount']),
-                videoCount: _toInt(event['videoCount']),
-                targetCount: _toInt(event['targetCount']),
-                isCompleted: event['isCompleted'] == true,
-              ),
+            final progress = NsfwGalleryLoadProgress(
+              page: _toInt(event['page']),
+              scannedAssets: _toInt(event['scannedAssets']),
+              imageCount: _toInt(event['imageCount']),
+              videoCount: _toInt(event['videoCount']),
+              targetCount: _toInt(event['targetCount']),
+              isCompleted: event['isCompleted'] == true,
             );
+            _updateWholeGalleryBackgroundJob(
+              job.id,
+              processed: progress.scannedAssets,
+              total: progress.targetCount ?? 0,
+              phase: progress.isCompleted
+                  ? 'load_completed'
+                  : 'loading_gallery',
+            );
+            onLoadProgress?.call(progress);
             return;
           }
 
           if (eventType == 'gallery_result_batch') {
             final chunkResult = _parseMediaBatchResult(event);
             if (chunkResult.items.isNotEmpty) {
-              final remainingCapacity = maxRetainedResultItems <= 0
+              final remainingCapacity = request.maxRetainedResultItems <= 0
                   ? 0
-                  : maxRetainedResultItems - streamedItems.length;
+                  : request.maxRetainedResultItems - streamedItems.length;
               if (remainingCapacity > 0) {
                 streamedItems.addAll(chunkResult.items.take(remainingCapacity));
               }
-              if (streamedItems.length >= maxRetainedResultItems &&
+              if (streamedItems.length >= request.maxRetainedResultItems &&
                   chunkResult.items.length > remainingCapacity) {
                 didTruncateItems = true;
               }
@@ -1076,6 +1208,12 @@ class FlutterNsfwScaner {
             streamedProcessed = _toInt(
               event['processedTotal'],
               fallback: streamedProcessed + chunkResult.processed,
+            );
+            _updateWholeGalleryBackgroundJob(
+              job.id,
+              processed: streamedProcessed,
+              total: _toInt(event['total']),
+              phase: 'processing_hits',
             );
             if (chunkResult.items.isNotEmpty) {
               queuedHaramiFromChunks = true;
@@ -1097,6 +1235,12 @@ class FlutterNsfwScaner {
             final progress = NsfwScanProgress.fromMap(event);
             final resolvedType =
                 _normalizeMediaType(progress.mediaType) ?? NsfwMediaType.image;
+            _updateWholeGalleryBackgroundJob(
+              job.id,
+              processed: progress.processed,
+              total: progress.total,
+              phase: progress.status,
+            );
             onScanProgress?.call(
               NsfwMediaBatchProgress(
                 processed: progress.processed,
@@ -1114,50 +1258,8 @@ class FlutterNsfwScaner {
         });
 
     try {
-      final gallerySettings = {
-        'includeImages': includeImages,
-        'includeVideos': includeVideos,
-        'pageSize': pageSize,
-        'startPage': startPage,
-        'maxPages': maxPages,
-        'maxItems': maxItems,
-        'scanChunkSize': scanChunkSize,
-        'preferThumbnailForImages': preferThumbnailForImages,
-        'thumbnailWidth': thumbnailWidth,
-        'thumbnailHeight': thumbnailHeight,
-        'thumbnailQuality': thumbnailQuality,
-        'thumbnailSize': math.min(thumbnailWidth, thumbnailHeight),
-        'includeCleanResults': includeCleanResults,
-        'resolveConcurrency': resolveConcurrency,
-        'includeOriginFileFallback': includeOriginFileFallback,
-        'retryPasses': retryPasses,
-        'retryDelayMs': retryDelayMs,
-        'loadProgressEvery': loadProgressEvery,
-        'maxRetainedResultItems': maxRetainedResultItems,
-        'debugLogging': debugLogging,
-        'imageThreshold': settings.imageThreshold,
-        'videoThreshold': settings.videoThreshold,
-        'videoSampleRateFps': settings.videoSampleRateFps,
-        'videoMaxFrames': settings.videoMaxFrames,
-        'dynamicVideoSampleRate': settings.dynamicVideoSampleRate,
-        'shortVideoMinSampleRateFps': settings.shortVideoMinSampleRateFps,
-        'shortVideoMaxSampleRateFps': settings.shortVideoMaxSampleRateFps,
-        'mediumVideoMinutesThreshold': settings.mediumVideoMinutesThreshold,
-        'longVideoMinutesThreshold': settings.longVideoMinutesThreshold,
-        'mediumVideoSampleRateFps': settings.mediumVideoSampleRateFps,
-        'longVideoSampleRateFps': settings.longVideoSampleRateFps,
-        'videoEarlyStopEnabled': settings.videoEarlyStopEnabled,
-        'videoEarlyStopBaseNsfwFrames': settings.videoEarlyStopBaseNsfwFrames,
-        'videoEarlyStopMediumBonusFrames':
-            settings.videoEarlyStopMediumBonusFrames,
-        'videoEarlyStopLongBonusFrames': settings.videoEarlyStopLongBonusFrames,
-        'videoEarlyStopVeryLongMinutesThreshold':
-            settings.videoEarlyStopVeryLongMinutesThreshold,
-        'videoEarlyStopVeryLongBonusFrames':
-            settings.videoEarlyStopVeryLongBonusFrames,
-        'maxConcurrency': settings.maxConcurrency,
-        'continueOnError': settings.continueOnError,
-      };
+      final gallerySettings = {...request.toNativeSettingsMap()};
+      _markWholeGalleryBackgroundJobRunning(job.id, scanId: scanId);
 
       Map<String, dynamic> payload;
       try {
@@ -1176,6 +1278,14 @@ class FlutterNsfwScaner {
           'errorCount': streamedErrors,
           'flaggedCount': streamedFlagged,
         };
+        endedEarly = true;
+        final existingStatus = _backgroundJobs[job.id]?.status;
+        _finishWholeGalleryBackgroundJob(
+          job.id,
+          status: existingStatus == NsfwBackgroundJobStatus.paused
+              ? NsfwBackgroundJobStatus.paused
+              : NsfwBackgroundJobStatus.cancelled,
+        );
       }
 
       if (!completionSignal.isCompleted) {
@@ -1187,8 +1297,8 @@ class FlutterNsfwScaner {
 
       final parsed = _parseMediaBatchResult(payload);
       if (streamedItems.isEmpty && parsed.items.isNotEmpty) {
-        final limitedItems = maxRetainedResultItems > 0
-            ? parsed.items.take(maxRetainedResultItems)
+        final limitedItems = request.maxRetainedResultItems > 0
+            ? parsed.items.take(request.maxRetainedResultItems)
             : const Iterable<NsfwMediaBatchItemResult>.empty();
         streamedItems.addAll(limitedItems);
         if (parsed.items.length > streamedItems.length) {
@@ -1215,7 +1325,22 @@ class FlutterNsfwScaner {
       if (!queuedHaramiFromChunks) {
         await _maybeAutoHaramiBatchHits(result.items, scanTag: 'scan_gallery');
       }
+      if (!endedEarly) {
+        _finishWholeGalleryBackgroundJob(
+          job.id,
+          status: NsfwBackgroundJobStatus.completed,
+          processed: result.processed,
+          total: result.processed,
+        );
+      }
       return result;
+    } catch (error) {
+      _finishWholeGalleryBackgroundJob(
+        job.id,
+        status: NsfwBackgroundJobStatus.failed,
+        lastError: '$error',
+      );
+      rethrow;
     } finally {
       await subscription.cancel();
     }
@@ -1921,6 +2046,19 @@ int _toInt(dynamic value, {int fallback = 0}) {
   }
   if (value is String) {
     return int.tryParse(value) ?? fallback;
+  }
+  return fallback;
+}
+
+double _toDouble(dynamic value, {double fallback = 0.0}) {
+  if (value is double) {
+    return value;
+  }
+  if (value is num) {
+    return value.toDouble();
+  }
+  if (value is String) {
+    return double.tryParse(value) ?? fallback;
   }
   return fallback;
 }

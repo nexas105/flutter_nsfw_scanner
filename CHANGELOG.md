@@ -1,3 +1,11 @@
+## 1.1.4
+
+- Added `NsfwBackgroundProcessingConfig` with default-enabled long-running background safeguards for uploads and whole-gallery scans.
+- Added `NsfwBackgroundController` plus public helpers (`getBackgroundJobs`, `resumePendingBackgroundJobs`, `resumeWholeGalleryScan`, `pauseWholeGalleryScan`, `cancelWholeGalleryScan`, `clearFinishedBackgroundJobs`, `isWholeGalleryScanRunning`, `waitForBackgroundTasks`).
+- Added a persisted whole-gallery scan coordinator in Dart that tracks job metadata, prevents concurrent whole-gallery scans by default, and auto-resumes interrupted gallery jobs on the next `initialize(...)`.
+- Kept upload queue persistence build-scoped and extended the long-running flow so staged uploads and whole-gallery jobs now share the same background-oriented lifecycle model.
+- Updated the example app to demonstrate background-processing defaults, waiting for pending uploads, and manual background job controls.
+
 ## 1.1.3
 
 - Improved iOS whole-gallery scan performance by reusing the image interpreter pool across gallery batches instead of rebuilding interpreters for every batch.

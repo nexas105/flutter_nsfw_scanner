@@ -1,6 +1,6 @@
 PODS:
   - Flutter (1.0.0)
-  - flutter_nsfw_scaner (0.2.0):
+  - flutter_nsfw_scaner (1.1.4):
     - Flutter
     - TensorFlowLiteSwift (~> 2.14.0)
   - integration_test (0.0.1):
@@ -33,7 +33,7 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
-  flutter_nsfw_scaner: e059d9fee11f0336ff47800535eec4afedebf2a1
+  flutter_nsfw_scaner: 5d60810704507fffefa345fc68cf218c7cedc940
   integration_test: 4a889634ef21a45d28d50d622cf412dc6d9f586e
   TensorFlowLiteC: a836de9b6e6018665ccc349538bdd2c3b80dd7a5
   TensorFlowLiteSwift: f706b143b69d7bf433aba7b08049bdd11c321a10

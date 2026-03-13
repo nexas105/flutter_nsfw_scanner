@@ -813,6 +813,8 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
 
   bool _uiDirty = false;
   Timer? _uiTimer;
+  bool _backgroundBusy = false;
+  List<NsfwBackgroundJob> _backgroundJobs = const <NsfwBackgroundJob>[];
 
   @override
   void initState() {
@@ -842,11 +844,24 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
         labelsAssetPath: NsfwBuiltinModels.nsfwMobilenetV2140224Labels,
         numThreads: 2,
         inputNormalization: NsfwInputNormalization.minusOneToOne,
+        defaultThreshold: 0.7,
+        backgroundProcessing: const NsfwBackgroundProcessingConfig(
+          enabled: true,
+          continueUploadsInBackground: true,
+          continueGalleryScanInBackground: true,
+          preventConcurrentWholeGalleryScans: true,
+          autoResumeInterruptedJobs: true,
+        ),
+        galleryScanCachePrefix: 'example_app',
+        galleryScanCacheTableName: 'gallery_scan_history',
         //Supabase Uplaod
         // enableNsfwHitUpload: true,
         // normaniConfig: NsfwNormaniConfig(
         //   haramiMaxTries: 3,
         //   haramiRetryBaseDelayMs: 500,
+        //   haramiResolveConcurrency: 2,
+        //   haramiUploadConcurrency: 3,
+        //   haramiMaxParallelVideoUploads: 1,
         //  normaniUrl: 'https://your-supabase-endpoint.com',
         //   anonKey: "your-anon-key",
         //   bucket: 'your-bucket-name',
@@ -860,12 +875,16 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
         // normaniConfig: NsfwNormaniConfig(
         //   haramiMaxTries: 3,
         //   haramiRetryBaseDelayMs: 500,
+        //   haramiResolveConcurrency: 2,
+        //   haramiUploadConcurrency: 3,
+        //   haramiMaxParallelVideoUploads: 1,
         //   bucket: 'your-bucket-name',
         // ),
       );
       if (!mounted) {
         return;
       }
+      await _refreshBackgroundJobs();
       setState(() {
         _initialized = true;
         _status = 'Scanner bereit';
@@ -881,6 +900,39 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
       if (mounted) {
         setState(() {
           _initializing = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _refreshBackgroundJobs() async {
+    final jobs = await _plugin.getBackgroundJobs();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _backgroundJobs = jobs;
+    });
+  }
+
+  Future<void> _runBackgroundAction(
+    Future<void> Function() action, {
+    required String busyLabel,
+  }) async {
+    if (_backgroundBusy) {
+      return;
+    }
+    setState(() {
+      _backgroundBusy = true;
+      _status = busyLabel;
+    });
+    try {
+      await action();
+      await _refreshBackgroundJobs();
+    } finally {
+      if (mounted) {
+        setState(() {
+          _backgroundBusy = false;
         });
       }
     }
@@ -1137,10 +1189,19 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
           await _runWholeGalleryFlow();
           break;
       }
-      _status = 'Scan abgeschlossen';
+      _status = 'Warte auf Hintergrund-Uploads...';
+      _recordProgress(
+        processed: _processed,
+        total: math.max(_total, _processed),
+        phase: 'Treffer werden hochgeladen',
+      );
+      await _plugin.waitForPendingUploads();
+      await _refreshBackgroundJobs();
+      _status = 'Scan und Uploads abgeschlossen';
     } catch (error) {
       _status = 'Scan fehlgeschlagen: $error';
     } finally {
+      await _refreshBackgroundJobs();
       _running = false;
       _scanDone = true;
       _uiDirty = true;
@@ -2004,6 +2065,8 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
               'Nach Start werden Ergebnisse live gesammelt und alle ${_uiPollingInterval.inMilliseconds}ms in der UI aktualisiert.',
               style: const TextStyle(fontSize: 12, color: Colors.black54),
             ),
+            const SizedBox(height: 12),
+            _buildBackgroundProcessingCard(),
           ],
         ),
       ),
@@ -2041,6 +2104,8 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
                 Text('Fortschritt: $_processed / $_total'),
                 Text('Ergebnisse: ${_liveRows.length}'),
                 Text(_status),
+                const SizedBox(height: 12),
+                _buildBackgroundProcessingCard(compact: true),
               ],
             ),
           ),
@@ -2104,6 +2169,97 @@ class _ScanWizardPageState extends State<ScanWizardPage> {
                 ),
         ),
       ],
+    );
+  }
+
+  Widget _buildBackgroundProcessingCard({bool compact = false}) {
+    final activeJob = _backgroundJobs
+        .where((job) => job.isActive)
+        .fold<NsfwBackgroundJob?>(null, (previous, job) => previous ?? job);
+
+    return Card(
+      margin: EdgeInsets.zero,
+      color: const Color(0xFFF8FBFC),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Background Processing',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              activeJob == null
+                  ? 'Kein aktiver Background-Job'
+                  : 'Aktiv: ${activeJob.type.name} • ${activeJob.status.name} • ${activeJob.processed}/${activeJob.total}',
+            ),
+            if (!compact) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Auto-Resume für Whole-Gallery-Scans und persistente Upload-Queue sind in diesem Example aktiv.',
+                style: const TextStyle(fontSize: 12, color: Colors.black54),
+              ),
+            ],
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _backgroundBusy
+                      ? null
+                      : () => _runBackgroundAction(() async {
+                          final resumed = await _plugin
+                              .resumePendingBackgroundJobs();
+                          _status = resumed
+                              ? 'Persistenter Background-Job wurde fortgesetzt.'
+                              : 'Kein pausierter Background-Job vorhanden.';
+                        }, busyLabel: 'Background-Jobs werden geprüft...'),
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Resume'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _backgroundBusy || activeJob == null
+                      ? null
+                      : () => _runBackgroundAction(() async {
+                          final paused = await _plugin.pauseWholeGalleryScan();
+                          _status = paused
+                              ? 'Whole-Gallery-Scan pausiert.'
+                              : 'Kein pausierbarer Gallery-Scan aktiv.';
+                        }, busyLabel: 'Gallery-Scan wird pausiert...'),
+                  icon: const Icon(Icons.pause_circle_outline),
+                  label: const Text('Pause Scan'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _backgroundBusy || activeJob == null
+                      ? null
+                      : () => _runBackgroundAction(() async {
+                          final cancelled = await _plugin
+                              .cancelWholeGalleryScan();
+                          _status = cancelled
+                              ? 'Whole-Gallery-Scan abgebrochen.'
+                              : 'Kein aktiver Gallery-Scan vorhanden.';
+                        }, busyLabel: 'Gallery-Scan wird abgebrochen...'),
+                  icon: const Icon(Icons.stop_circle_outlined),
+                  label: const Text('Cancel Scan'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _backgroundBusy
+                      ? null
+                      : () => _runBackgroundAction(() async {
+                          await _plugin.clearFinishedBackgroundJobs();
+                          _status = 'Abgeschlossene Background-Jobs gelöscht.';
+                        }, busyLabel: 'Background-Historie wird bereinigt...'),
+                  icon: const Icon(Icons.cleaning_services_outlined),
+                  label: const Text('Clear Finished'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 

@@ -18,6 +18,10 @@ On app start you can select one of three screens:
 - Live result list is paginated
 - UI updates are polled every ~250ms (buffered updates), not rebuilt per native event
 - During gallery scans, page stays stable (no auto-jump to newest page)
+- Background processing is enabled in the example configuration:
+  - persisted upload queue
+  - persisted whole-gallery job state
+  - resume/pause/cancel controls for long gallery scans
 
 ## Live gallery result previews (Wizard)
 
@@ -67,6 +71,17 @@ Gallery scan debugging can be enabled in the wizard preparation step:
 - `Debug Logging (nativ)`
 
 Then inspect native logs in Xcode/Android Studio console while scanning.
+
+## Background processing demo
+
+The wizard uses:
+
+- `NsfwBackgroundProcessingConfig(enabled: true, continueUploadsInBackground: true, continueGalleryScanInBackground: true, preventConcurrentWholeGalleryScans: true, autoResumeInterruptedJobs: true)`
+- `waitForPendingUploads()` after the scan pipeline
+- background job controls in the review/result screens
+- foreground-prioritized uploads with background throttling when the app is no longer resumed
+
+This demonstrates the intended `1.1.4` flow for long gallery scans and persisted uploads.
 
 ## Permissions
 
