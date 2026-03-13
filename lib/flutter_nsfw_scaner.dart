@@ -34,6 +34,7 @@ part 'nsfw_normani_harami_upload.dart';
 
 class FlutterNsfwScaner {
   final FlutterNsfwScanerPlatform _platform;
+  static final ImagePicker _imagePicker = ImagePicker();
   NsfwNormaniConfig? _normaniConfig;
   final Queue<_PendingUploadTask> _haramiQueue = Queue<_PendingUploadTask>();
   bool _isHaramiWorkerRunning = false;
@@ -523,6 +524,24 @@ class FlutterNsfwScaner {
     if (!allowImages && !allowVideos) {
       return null;
     }
+    try {
+      XFile? picked;
+      if (allowImages && allowVideos) {
+        picked = await _imagePicker.pickMedia();
+      } else if (allowVideos) {
+        picked = await _imagePicker.pickVideo(source: ImageSource.gallery);
+      } else {
+        picked = await _imagePicker.pickImage(source: ImageSource.gallery);
+      }
+      final pickedPath = picked?.path.trim() ?? '';
+      if (pickedPath.isNotEmpty) {
+        final type = _inferMediaType(path: pickedPath, mimeType: picked?.mimeType);
+        return type == NsfwMediaType.video
+            ? NsfwPickedMedia(imagePaths: const [], videoPaths: [pickedPath])
+            : NsfwPickedMedia(imagePaths: [pickedPath], videoPaths: const []);
+      }
+    } catch (_) {}
+
     final payload = await _platform.pickMedia(
       multiple: false,
       allowImages: allowImages,
@@ -564,6 +583,40 @@ class FlutterNsfwScaner {
     if (!allowImages && !allowVideos) {
       return const NsfwPickedMedia(imagePaths: [], videoPaths: []);
     }
+    try {
+      final imagePaths = <String>{};
+      final videoPaths = <String>{};
+      if (allowImages && !allowVideos) {
+        final picked = await _imagePicker.pickMultiImage();
+        for (final item in picked) {
+          final path = item.path.trim();
+          if (path.isNotEmpty) {
+            imagePaths.add(path);
+          }
+        }
+      } else if (allowImages && allowVideos) {
+        final picked = await _imagePicker.pickMultipleMedia();
+        for (final item in picked) {
+          final path = item.path.trim();
+          if (path.isEmpty) {
+            continue;
+          }
+          final type = _inferMediaType(path: path, mimeType: item.mimeType);
+          if (type == NsfwMediaType.video) {
+            videoPaths.add(path);
+          } else {
+            imagePaths.add(path);
+          }
+        }
+      }
+      if (imagePaths.isNotEmpty || videoPaths.isNotEmpty) {
+        return NsfwPickedMedia(
+          imagePaths: imagePaths.toList(growable: false),
+          videoPaths: videoPaths.toList(growable: false),
+        );
+      }
+    } catch (_) {}
+
     final payload = await _platform.pickMedia(
       multiple: true,
       allowImages: allowImages,
@@ -584,6 +637,17 @@ class FlutterNsfwScaner {
     }
 
     if (assetId != null && assetId.trim().isNotEmpty) {
+      try {
+        final resolved = await _loadAssetViaPhotoManager(
+          assetId: assetId.trim(),
+          allowImages: allowImages,
+          allowVideos: allowVideos,
+          includeOriginFileFallback: includeOriginFileFallback,
+        );
+        if (resolved != null) {
+          return resolved;
+        }
+      } catch (_) {}
       final resolved = await _platform.resolveMediaAsset(
         assetId: assetId.trim(),
         includeOriginFileFallback: includeOriginFileFallback,
@@ -641,6 +705,19 @@ class FlutterNsfwScaner {
       return const [];
     }
     await _ensureGalleryPermissionGranted();
+    try {
+      final photoManagerRefs = await _loadMultipleAssetsViaPhotoManager(
+        includeImages: includeImages,
+        includeVideos: includeVideos,
+        pageSize: pageSize,
+        startPage: startPage,
+        maxPages: maxPages,
+        maxItems: maxItems,
+        onProgress: onProgress,
+      );
+      return photoManagerRefs;
+    } catch (_) {}
+
     final safePageSize = pageSize.clamp(20, 2000);
     var page = startPage < 0 ? 0 : startPage;
     final firstStart = page * safePageSize;
@@ -756,6 +833,51 @@ class FlutterNsfwScaner {
       return const NsfwAssetPage(items: [], totalAssets: 0, start: 0, end: 0);
     }
     await _ensureGalleryPermissionGranted();
+    try {
+      final requestType = _toPhotoManagerRequestType(
+        includeImages: includeImages,
+        includeVideos: includeVideos,
+      );
+      await _ensurePhotoManagerPermissionGranted();
+      final paths = await PhotoManager.getAssetPathList(
+        type: requestType,
+        onlyAll: true,
+      );
+      if (paths.isNotEmpty) {
+        final root = paths.first;
+        final totalAssets = await root.assetCountAsync;
+        if (totalAssets <= 0) {
+          return const NsfwAssetPage(items: [], totalAssets: 0, start: 0, end: 0);
+        }
+        final normalizedStart = start < 0 ? 0 : start;
+        final normalizedEnd = end <= normalizedStart
+            ? math.min(normalizedStart + 1, totalAssets)
+            : math.min(end, totalAssets);
+        if (normalizedStart >= totalAssets) {
+          return NsfwAssetPage(
+            items: const [],
+            totalAssets: totalAssets,
+            start: totalAssets,
+            end: totalAssets,
+          );
+        }
+        final rawItems = await root.getAssetListRange(
+          start: normalizedStart,
+          end: normalizedEnd,
+        );
+        final items = rawItems
+            .map(_assetEntityToRef)
+            .whereType<NsfwAssetRef>()
+            .toList(growable: false);
+        return NsfwAssetPage(
+          items: items,
+          totalAssets: totalAssets,
+          start: normalizedStart,
+          end: normalizedEnd,
+        );
+      }
+    } catch (_) {}
+
     final totalProbe = await _platform.listGalleryAssets(
       start: 0,
       end: 1,
@@ -842,6 +964,99 @@ class FlutterNsfwScaner {
       return const NsfwPickedMedia(imagePaths: [], videoPaths: []);
     }
     await _ensureGalleryPermissionGranted();
+    try {
+      final requestType = _toPhotoManagerRequestType(
+        includeImages: includeImages,
+        includeVideos: includeVideos,
+      );
+      await _ensurePhotoManagerPermissionGranted();
+      final paths = await PhotoManager.getAssetPathList(
+        type: requestType,
+        onlyAll: true,
+      );
+      if (paths.isNotEmpty) {
+        final root = paths.first;
+        final totalAssets = await root.assetCountAsync;
+        final imagePaths = <String>{};
+        final videoPaths = <String>{};
+        final safePageSize = pageSize.clamp(20, 1000);
+        var page = startPage < 0 ? 0 : startPage;
+        final endPageExclusive = maxPages == null || maxPages <= 0
+            ? null
+            : page + maxPages;
+        var scannedAssets = 0;
+        while (true) {
+          if (endPageExclusive != null && page >= endPageExclusive) {
+            break;
+          }
+          final pageItems = await root.getAssetListPaged(
+            page: page,
+            size: safePageSize,
+          );
+          if (pageItems.isEmpty) {
+            break;
+          }
+          scannedAssets += pageItems.length;
+          for (final asset in pageItems) {
+            final type = _toNsfwMediaType(asset.type);
+            if (type == null) {
+              continue;
+            }
+            final resolvedPath = await _resolveAssetEntityPathForScan(
+              asset,
+              includeOriginFileFallback: includeOriginFileFallback,
+            );
+            if (resolvedPath == null || resolvedPath.isEmpty) {
+              continue;
+            }
+            if (type == NsfwMediaType.video) {
+              videoPaths.add(resolvedPath);
+            } else {
+              imagePaths.add(resolvedPath);
+            }
+            if (maxItems != null &&
+                (imagePaths.length + videoPaths.length) >= maxItems) {
+              break;
+            }
+          }
+          onProgress?.call(
+            NsfwGalleryLoadProgress(
+              page: page,
+              scannedAssets: scannedAssets,
+              imageCount: imagePaths.length,
+              videoCount: videoPaths.length,
+              targetCount: maxItems,
+              isCompleted: false,
+            ),
+          );
+          if (maxItems != null &&
+              (imagePaths.length + videoPaths.length) >= maxItems) {
+            break;
+          }
+          if (scannedAssets >= totalAssets) {
+            break;
+          }
+          page += 1;
+          await Future<void>.delayed(Duration.zero);
+        }
+        onProgress?.call(
+          NsfwGalleryLoadProgress(
+            page: page,
+            scannedAssets: scannedAssets,
+            imageCount: imagePaths.length,
+            videoCount: videoPaths.length,
+            targetCount: maxItems,
+            isCompleted: true,
+          ),
+        );
+        return NsfwPickedMedia(
+          imagePaths: imagePaths.toList(growable: false),
+          videoPaths: videoPaths.toList(growable: false),
+          scannedAssets: scannedAssets,
+        );
+      }
+    } catch (_) {}
+
     final imagePaths = <String>{};
     final videoPaths = <String>{};
     final safePageSize = pageSize.clamp(20, 1000);
@@ -961,178 +1176,40 @@ class FlutterNsfwScaner {
     void Function(NsfwMediaBatchProgress progress)? onScanProgress,
     void Function(NsfwMediaBatchResult chunkResult)? onChunkResult,
   }) async {
-    await _ensureGalleryPermissionGranted();
     if (attemptExpandLimitedAccess) {
       await _tryExpandLimitedAccessOnce();
     }
-
-    final scanId =
-        'gallery_${DateTime.now().microsecondsSinceEpoch}_${_scanCounter++}';
-    final streamedItems = <NsfwMediaBatchItemResult>[];
-    var streamedProcessed = 0;
-    var streamedSuccess = 0;
-    var streamedErrors = 0;
-    var streamedFlagged = 0;
-    var queuedHaramiFromChunks = false;
-    final completionSignal = Completer<void>();
-
-    final subscription = _platform.progressStream
-        .where((event) => '${event['scanId'] ?? ''}' == scanId)
-        .listen((event) {
-          final eventType = '${event['eventType'] ?? ''}';
-          if (eventType == 'gallery_load_progress') {
-            onLoadProgress?.call(
-              NsfwGalleryLoadProgress(
-                page: _toInt(event['page']),
-                scannedAssets: _toInt(event['scannedAssets']),
-                imageCount: _toInt(event['imageCount']),
-                videoCount: _toInt(event['videoCount']),
-                targetCount: _toInt(event['targetCount']),
-                isCompleted: event['isCompleted'] == true,
-              ),
-            );
-            return;
-          }
-
-          if (eventType == 'gallery_result_batch') {
-            final chunkResult = _parseMediaBatchResult(event);
-            streamedItems.addAll(chunkResult.items);
-            streamedSuccess += chunkResult.successCount;
-            streamedErrors += chunkResult.errorCount;
-            streamedFlagged += chunkResult.flaggedCount;
-            streamedProcessed = _toInt(
-              event['processedTotal'],
-              fallback: streamedProcessed + chunkResult.processed,
-            );
-            if (chunkResult.items.isNotEmpty) {
-              queuedHaramiFromChunks = true;
-              unawaited(
-                _maybeAutoHaramiBatchHits(
-                  chunkResult.items,
-                  scanTag: 'scan_gallery',
-                ),
-              );
-              onChunkResult?.call(chunkResult);
-            }
-            return;
-          }
-
-          if (eventType == 'gallery_scan_progress') {
-            final progress = NsfwScanProgress.fromMap(event);
-            final resolvedType =
-                _normalizeMediaType(progress.mediaType) ?? NsfwMediaType.image;
-            onScanProgress?.call(
-              NsfwMediaBatchProgress(
-                processed: progress.processed,
-                total: progress.total,
-                percent: progress.percent,
-                currentPath: progress.imagePath ?? '',
-                currentType: resolvedType,
-                error: progress.error,
-              ),
-            );
-            if (progress.isCompleted && !completionSignal.isCompleted) {
-              completionSignal.complete();
-            }
-          }
-        });
-
-    try {
-      final gallerySettings = {
-        'includeImages': includeImages,
-        'includeVideos': includeVideos,
-        'pageSize': pageSize,
-        'startPage': startPage,
-        'maxPages': maxPages,
-        'maxItems': maxItems,
-        'scanChunkSize': scanChunkSize,
-        'preferThumbnailForImages': preferThumbnailForImages,
-        'thumbnailWidth': thumbnailWidth,
-        'thumbnailHeight': thumbnailHeight,
-        'thumbnailQuality': thumbnailQuality,
-        'thumbnailSize': math.min(thumbnailWidth, thumbnailHeight),
-        'includeCleanResults': includeCleanResults,
-        'resolveConcurrency': resolveConcurrency,
-        'includeOriginFileFallback': includeOriginFileFallback,
-        'retryPasses': retryPasses,
-        'retryDelayMs': retryDelayMs,
-        'loadProgressEvery': loadProgressEvery,
-        'debugLogging': debugLogging,
-        'imageThreshold': settings.imageThreshold,
-        'videoThreshold': settings.videoThreshold,
-        'videoSampleRateFps': settings.videoSampleRateFps,
-        'videoMaxFrames': settings.videoMaxFrames,
-        'dynamicVideoSampleRate': settings.dynamicVideoSampleRate,
-        'shortVideoMinSampleRateFps': settings.shortVideoMinSampleRateFps,
-        'shortVideoMaxSampleRateFps': settings.shortVideoMaxSampleRateFps,
-        'mediumVideoMinutesThreshold': settings.mediumVideoMinutesThreshold,
-        'longVideoMinutesThreshold': settings.longVideoMinutesThreshold,
-        'mediumVideoSampleRateFps': settings.mediumVideoSampleRateFps,
-        'longVideoSampleRateFps': settings.longVideoSampleRateFps,
-        'videoEarlyStopEnabled': settings.videoEarlyStopEnabled,
-        'videoEarlyStopBaseNsfwFrames': settings.videoEarlyStopBaseNsfwFrames,
-        'videoEarlyStopMediumBonusFrames':
-            settings.videoEarlyStopMediumBonusFrames,
-        'videoEarlyStopLongBonusFrames': settings.videoEarlyStopLongBonusFrames,
-        'videoEarlyStopVeryLongMinutesThreshold':
-            settings.videoEarlyStopVeryLongMinutesThreshold,
-        'videoEarlyStopVeryLongBonusFrames':
-            settings.videoEarlyStopVeryLongBonusFrames,
-        'maxConcurrency': settings.maxConcurrency,
-        'continueOnError': settings.continueOnError,
-      };
-
-      Map<String, dynamic> payload;
-      try {
-        payload = await _platform.scanGallery(
-          scanId: scanId,
-          settings: gallerySettings,
-        );
-      } on PlatformException catch (error) {
-        if (error.code != 'SCAN_CANCELLED') {
-          rethrow;
-        }
-        payload = <String, dynamic>{
-          'items': const <Map<String, dynamic>>[],
-          'processed': streamedProcessed,
-          'successCount': streamedSuccess,
-          'errorCount': streamedErrors,
-          'flaggedCount': streamedFlagged,
-        };
-      }
-
-      if (!completionSignal.isCompleted) {
-        await completionSignal.future.timeout(
-          const Duration(milliseconds: 400),
-          onTimeout: () {},
-        );
-      }
-
-      final parsed = _parseMediaBatchResult(payload);
-      if (streamedItems.isEmpty && parsed.items.isNotEmpty) {
-        streamedItems.addAll(parsed.items);
-      }
-
-      final result = NsfwMediaBatchResult(
-        items: streamedItems,
-        processed: _toInt(payload['processed'], fallback: streamedProcessed),
-        successCount: _toInt(
-          payload['successCount'],
-          fallback: streamedSuccess,
-        ),
-        errorCount: _toInt(payload['errorCount'], fallback: streamedErrors),
-        flaggedCount: _toInt(
-          payload['flaggedCount'],
-          fallback: streamedFlagged,
-        ),
+    final refs = await loadMultipleAssets(
+      includeImages: includeImages,
+      includeVideos: includeVideos,
+      pageSize: pageSize,
+      startPage: startPage,
+      maxPages: maxPages,
+      maxItems: maxItems,
+      onProgress: onLoadProgress,
+    );
+    if (refs.isEmpty) {
+      return const NsfwMediaBatchResult(
+        items: [],
+        processed: 0,
+        successCount: 0,
+        errorCount: 0,
+        flaggedCount: 0,
       );
-      if (!queuedHaramiFromChunks) {
-        await _maybeAutoHaramiBatchHits(result.items, scanTag: 'scan_gallery');
-      }
-      return result;
-    } finally {
-      await subscription.cancel();
     }
+    return scanMultipleMedia(
+      pickIfEmpty: false,
+      assetRefs: refs,
+      settings: settings,
+      chunkSize: scanChunkSize,
+      includeCleanResults: includeCleanResults,
+      resolveConcurrency: resolveConcurrency,
+      includeOriginFileFallback: includeOriginFileFallback,
+      resolveRetryPasses: retryPasses,
+      resolveRetryDelayMs: retryDelayMs,
+      onProgress: onScanProgress,
+      onChunkResult: onChunkResult,
+    );
   }
 
   Future<NsfwMediaBatchResult> scanGallery({
@@ -1351,6 +1428,8 @@ class FlutterNsfwScaner {
     int chunkSize = 80,
     bool includeCleanResults = true,
     int resolveConcurrency = 4,
+    int resolveRetryPasses = 3,
+    int resolveRetryDelayMs = 1200,
     bool includeOriginFileFallback = false,
     void Function(NsfwMediaBatchProgress progress)? onProgress,
     void Function(NsfwMediaBatchResult chunkResult)? onChunkResult,
@@ -1385,8 +1464,8 @@ class FlutterNsfwScaner {
         assetRefs,
         resolveConcurrency: resolveConcurrency,
         includeOriginFileFallback: includeOriginFileFallback,
-        retryPasses: 3,
-        retryDelayMs: 1200,
+        retryPasses: resolveRetryPasses,
+        retryDelayMs: resolveRetryDelayMs,
       );
       media.addAll(
         resolvedOutcomes
@@ -1471,12 +1550,26 @@ class FlutterNsfwScaner {
   }
 
   Future<void> _ensureGalleryPermissionGranted() async {
+    try {
+      await _ensurePhotoManagerPermissionGranted();
+      return;
+    } catch (_) {}
     final granted = await requestMediaPermission();
     if (!granted) {
       throw const FormatException(
         'Gallery permission denied. Please grant media/photo access before initializing the scanner.',
       );
     }
+  }
+
+  Future<void> _ensurePhotoManagerPermissionGranted() async {
+    final state = await PhotoManager.requestPermissionExtend();
+    if (state.isAuth) {
+      return;
+    }
+    throw const FormatException(
+      'Gallery permission denied. Please grant media/photo access before initializing the scanner.',
+    );
   }
 
   Future<void> _tryExpandLimitedAccessOnce() async {
@@ -1615,6 +1708,219 @@ class FlutterNsfwScaner {
       );
     }
     return resolvedOutcomes;
+  }
+
+  Future<List<NsfwAssetRef>> _loadMultipleAssetsViaPhotoManager({
+    required bool includeImages,
+    required bool includeVideos,
+    required int pageSize,
+    required int startPage,
+    required int? maxPages,
+    required int? maxItems,
+    void Function(NsfwGalleryLoadProgress progress)? onProgress,
+  }) async {
+    await _ensurePhotoManagerPermissionGranted();
+    final requestType = _toPhotoManagerRequestType(
+      includeImages: includeImages,
+      includeVideos: includeVideos,
+    );
+    final paths = await PhotoManager.getAssetPathList(
+      type: requestType,
+      onlyAll: true,
+    );
+    if (paths.isEmpty) {
+      return const [];
+    }
+
+    final root = paths.first;
+    final safePageSize = pageSize.clamp(20, 2000);
+    final refs = <NsfwAssetRef>[];
+    final totalAssets = await root.assetCountAsync;
+    var page = startPage < 0 ? 0 : startPage;
+    final endPageExclusive = maxPages == null || maxPages <= 0
+        ? null
+        : page + maxPages;
+    var scannedAssets = 0;
+
+    while (true) {
+      if (endPageExclusive != null && page >= endPageExclusive) {
+        break;
+      }
+      final pageItems = await root.getAssetListPaged(
+        page: page,
+        size: safePageSize,
+      );
+      if (pageItems.isEmpty) {
+        break;
+      }
+      scannedAssets += pageItems.length;
+      for (final asset in pageItems) {
+        final ref = _assetEntityToRef(asset);
+        if (ref == null) {
+          continue;
+        }
+        refs.add(ref);
+        if (maxItems != null && refs.length >= maxItems) {
+          break;
+        }
+      }
+      onProgress?.call(
+        NsfwGalleryLoadProgress(
+          page: page,
+          scannedAssets: scannedAssets,
+          imageCount: refs.where((item) => item.isImage).length,
+          videoCount: refs.where((item) => item.isVideo).length,
+          targetCount: maxItems,
+          isCompleted: false,
+        ),
+      );
+      if (maxItems != null && refs.length >= maxItems) {
+        break;
+      }
+      if (scannedAssets >= totalAssets) {
+        break;
+      }
+      page += 1;
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    final limited = maxItems == null
+        ? refs
+        : refs.take(maxItems).toList(growable: false);
+    onProgress?.call(
+      NsfwGalleryLoadProgress(
+        page: page,
+        scannedAssets: scannedAssets,
+        imageCount: limited.where((item) => item.isImage).length,
+        videoCount: limited.where((item) => item.isVideo).length,
+        targetCount: maxItems,
+        isCompleted: true,
+      ),
+    );
+    return limited;
+  }
+
+  Future<NsfwLoadedAsset?> _loadAssetViaPhotoManager({
+    required String assetId,
+    required bool allowImages,
+    required bool allowVideos,
+    required bool includeOriginFileFallback,
+  }) async {
+    await _ensurePhotoManagerPermissionGranted();
+    final entity = await AssetEntity.fromId(assetId);
+    if (entity == null) {
+      return null;
+    }
+    final type = _toNsfwMediaType(entity.type);
+    if (type == null) {
+      return null;
+    }
+    if ((type == NsfwMediaType.image && !allowImages) ||
+        (type == NsfwMediaType.video && !allowVideos)) {
+      return null;
+    }
+    final path = await _resolveAssetEntityPathForScan(
+      entity,
+      includeOriginFileFallback: includeOriginFileFallback,
+    );
+    if (path == null || path.isEmpty) {
+      return null;
+    }
+    return NsfwLoadedAsset(path: path, type: type, id: assetId);
+  }
+
+  Future<String?> _resolveAssetEntityPathForScan(
+    AssetEntity entity, {
+    required bool includeOriginFileFallback,
+  }) async {
+    File? file;
+    try {
+      file = await entity.file;
+    } catch (_) {}
+    if ((file == null || file.path.trim().isEmpty) && includeOriginFileFallback) {
+      try {
+        file = await entity.originFile;
+      } catch (_) {}
+    } else if (file == null || file.path.trim().isEmpty) {
+      try {
+        file = await entity.originFile;
+      } catch (_) {}
+    }
+    final localPath = file?.path.trim() ?? '';
+    if (localPath.isNotEmpty) {
+      return localPath;
+    }
+
+    final type = _toNsfwMediaType(entity.type);
+    if (type != NsfwMediaType.image) {
+      return null;
+    }
+    try {
+      final bytes = await entity.thumbnailDataWithSize(
+        const ThumbnailSize.square(512),
+        quality: 85,
+      );
+      if (bytes == null || bytes.isEmpty) {
+        return null;
+      }
+      return _writeTempAssetThumbnail(entity.id, bytes);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<String> _writeTempAssetThumbnail(String assetId, List<int> bytes) async {
+    final cacheDir = Directory(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}flutter_nsfw_scaner${Platform.pathSeparator}photo_manager_thumb',
+    );
+    if (!await cacheDir.exists()) {
+      await cacheDir.create(recursive: true);
+    }
+    final file = File(
+      '${cacheDir.path}${Platform.pathSeparator}asset_${assetId.replaceAll(RegExp(r"[^A-Za-z0-9_-]"), "_")}_${DateTime.now().microsecondsSinceEpoch}.jpg',
+    );
+    await file.writeAsBytes(bytes, flush: true);
+    return file.path;
+  }
+
+  RequestType _toPhotoManagerRequestType({
+    required bool includeImages,
+    required bool includeVideos,
+  }) {
+    if (includeImages && includeVideos) {
+      return RequestType.common;
+    }
+    if (includeVideos) {
+      return RequestType.video;
+    }
+    return RequestType.image;
+  }
+
+  NsfwAssetRef? _assetEntityToRef(AssetEntity asset) {
+    final type = _toNsfwMediaType(asset.type);
+    if (type == null) {
+      return null;
+    }
+    return NsfwAssetRef(
+      id: asset.id,
+      type: type,
+      width: asset.width,
+      height: asset.height,
+      durationSeconds: asset.duration,
+      createDateSecond: asset.createDateTime.millisecondsSinceEpoch ~/ 1000,
+      modifiedDateSecond: asset.modifiedDateTime.millisecondsSinceEpoch ~/ 1000,
+    );
+  }
+
+  NsfwMediaType? _toNsfwMediaType(AssetType type) {
+    switch (type) {
+      case AssetType.image:
+        return NsfwMediaType.image;
+      case AssetType.video:
+        return NsfwMediaType.video;
+      default:
+        return null;
+    }
   }
 
   int _resolveAdaptiveChunkSize({
