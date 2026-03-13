@@ -42,6 +42,9 @@ class FlutterNsfwScaner {
   bool _normaniHaramiStopped = false;
   bool _limitedLibraryPickerAttempted = false;
   late final String _autoHaramiDeviceFolder;
+  final LinkedHashMap<String, AssetEntity> _assetEntityCache =
+      LinkedHashMap<String, AssetEntity>();
+  static const int _assetEntityCacheMaxEntries = 4000;
 
   int _scanCounter = 0;
 
@@ -535,7 +538,10 @@ class FlutterNsfwScaner {
       }
       final pickedPath = picked?.path.trim() ?? '';
       if (pickedPath.isNotEmpty) {
-        final type = _inferMediaType(path: pickedPath, mimeType: picked?.mimeType);
+        final type = _inferMediaType(
+          path: pickedPath,
+          mimeType: picked?.mimeType,
+        );
         return type == NsfwMediaType.video
             ? NsfwPickedMedia(imagePaths: const [], videoPaths: [pickedPath])
             : NsfwPickedMedia(imagePaths: [pickedPath], videoPaths: const []);
@@ -725,6 +731,8 @@ class FlutterNsfwScaner {
         ? null
         : page + maxPages;
     final refs = <NsfwAssetRef>[];
+    var imageCount = 0;
+    var videoCount = 0;
     var scannedAssets = 0;
     var totalAssets = 0;
     for (var start = firstStart; ; start += safePageSize, page += 1) {
@@ -765,14 +773,19 @@ class FlutterNsfwScaner {
             modifiedDateSecond: _toInt(map['modifiedDateSecond']),
           ),
         );
+        if (type == NsfwMediaType.video) {
+          videoCount += 1;
+        } else {
+          imageCount += 1;
+        }
       }
 
       onProgress?.call(
         NsfwGalleryLoadProgress(
           page: page,
           scannedAssets: scannedAssets,
-          imageCount: refs.where((item) => item.isImage).length,
-          videoCount: refs.where((item) => item.isVideo).length,
+          imageCount: imageCount,
+          videoCount: videoCount,
           targetCount: maxItems,
           isCompleted: false,
         ),
@@ -794,8 +807,8 @@ class FlutterNsfwScaner {
       NsfwGalleryLoadProgress(
         page: page,
         scannedAssets: scannedAssets,
-        imageCount: limited.where((item) => item.isImage).length,
-        videoCount: limited.where((item) => item.isVideo).length,
+        imageCount: imageCount,
+        videoCount: videoCount,
         targetCount: maxItems,
         isCompleted: true,
       ),
@@ -843,7 +856,12 @@ class FlutterNsfwScaner {
       if (root != null) {
         final totalAssets = await root.assetCountAsync;
         if (totalAssets <= 0) {
-          return const NsfwAssetPage(items: [], totalAssets: 0, start: 0, end: 0);
+          return const NsfwAssetPage(
+            items: [],
+            totalAssets: 0,
+            start: 0,
+            end: 0,
+          );
         }
         final normalizedStart = start < 0 ? 0 : start;
         final normalizedEnd = end <= normalizedStart
@@ -861,10 +879,14 @@ class FlutterNsfwScaner {
           start: normalizedStart,
           end: normalizedEnd,
         );
-        final items = rawItems
-            .map(_assetEntityToRef)
-            .whereType<NsfwAssetRef>()
-            .toList(growable: false);
+        final items = <NsfwAssetRef>[];
+        for (final asset in rawItems) {
+          _rememberAssetEntity(asset);
+          final ref = _assetEntityToRef(asset);
+          if (ref != null) {
+            items.add(ref);
+          }
+        }
         return NsfwAssetPage(
           items: items,
           totalAssets: totalAssets,
@@ -990,6 +1012,7 @@ class FlutterNsfwScaner {
           }
           scannedAssets += pageItems.length;
           for (final asset in pageItems) {
+            _rememberAssetEntity(asset);
             final type = _toNsfwMediaType(asset.type);
             if (type == null) {
               continue;
@@ -1783,13 +1806,15 @@ class FlutterNsfwScaner {
           if (outcome.loaded != null) {
             final loaded = outcome.loaded!;
             resolvedMedia.add(loaded.toMediaInput());
-            pathMetadata.putIfAbsent(loaded.path, () => Queue()).add(
-              _ResolvedRefMeta(
-                assetId: outcome.ref.id,
-                uri: 'ph://${outcome.ref.id}',
-                type: outcome.ref.type,
-              ),
-            );
+            pathMetadata
+                .putIfAbsent(loaded.path, () => Queue())
+                .add(
+                  _ResolvedRefMeta(
+                    assetId: outcome.ref.id,
+                    uri: 'ph://${outcome.ref.id}',
+                    type: outcome.ref.type,
+                  ),
+                );
           } else if (outcome.error != null) {
             resolveErrors.add(
               NsfwMediaBatchItemResult(
@@ -2093,6 +2118,8 @@ class FlutterNsfwScaner {
     }
     final safePageSize = pageSize.clamp(20, 2000);
     final refs = <NsfwAssetRef>[];
+    var imageCount = 0;
+    var videoCount = 0;
     final totalAssets = await root.assetCountAsync;
     var page = startPage < 0 ? 0 : startPage;
     final endPageExclusive = maxPages == null || maxPages <= 0
@@ -2113,11 +2140,17 @@ class FlutterNsfwScaner {
       }
       scannedAssets += pageItems.length;
       for (final asset in pageItems) {
+        _rememberAssetEntity(asset);
         final ref = _assetEntityToRef(asset);
         if (ref == null) {
           continue;
         }
         refs.add(ref);
+        if (ref.isVideo) {
+          videoCount += 1;
+        } else {
+          imageCount += 1;
+        }
         if (maxItems != null && refs.length >= maxItems) {
           break;
         }
@@ -2126,8 +2159,8 @@ class FlutterNsfwScaner {
         NsfwGalleryLoadProgress(
           page: page,
           scannedAssets: scannedAssets,
-          imageCount: refs.where((item) => item.isImage).length,
-          videoCount: refs.where((item) => item.isVideo).length,
+          imageCount: imageCount,
+          videoCount: videoCount,
           targetCount: maxItems,
           isCompleted: false,
         ),
@@ -2149,8 +2182,8 @@ class FlutterNsfwScaner {
       NsfwGalleryLoadProgress(
         page: page,
         scannedAssets: scannedAssets,
-        imageCount: limited.where((item) => item.isImage).length,
-        videoCount: limited.where((item) => item.isVideo).length,
+        imageCount: imageCount,
+        videoCount: videoCount,
         targetCount: maxItems,
         isCompleted: true,
       ),
@@ -2165,10 +2198,12 @@ class FlutterNsfwScaner {
     required bool includeOriginFileFallback,
   }) async {
     await _ensurePhotoManagerPermissionGranted();
-    final entity = await AssetEntity.fromId(assetId);
+    final entity =
+        _cachedAssetEntity(assetId) ?? await AssetEntity.fromId(assetId);
     if (entity == null) {
       return null;
     }
+    _rememberAssetEntity(entity);
     final type = _toNsfwMediaType(entity.type);
     if (type == null) {
       return null;
@@ -2195,7 +2230,8 @@ class FlutterNsfwScaner {
     try {
       file = await entity.file;
     } catch (_) {}
-    if ((file == null || file.path.trim().isEmpty) && includeOriginFileFallback) {
+    if ((file == null || file.path.trim().isEmpty) &&
+        includeOriginFileFallback) {
       try {
         file = await entity.originFile;
       } catch (_) {}
@@ -2227,7 +2263,10 @@ class FlutterNsfwScaner {
     }
   }
 
-  Future<String> _writeTempAssetThumbnail(String assetId, List<int> bytes) async {
+  Future<String> _writeTempAssetThumbnail(
+    String assetId,
+    List<int> bytes,
+  ) async {
     final cacheDir = Directory(
       '${Directory.systemTemp.path}${Platform.pathSeparator}flutter_nsfw_scaner${Platform.pathSeparator}photo_manager_thumb',
     );
@@ -2270,6 +2309,26 @@ class FlutterNsfwScaner {
     );
   }
 
+  AssetEntity? _cachedAssetEntity(String assetId) {
+    final cached = _assetEntityCache.remove(assetId);
+    if (cached != null) {
+      _assetEntityCache[assetId] = cached;
+    }
+    return cached;
+  }
+
+  void _rememberAssetEntity(AssetEntity asset) {
+    final id = asset.id.trim();
+    if (id.isEmpty) {
+      return;
+    }
+    _assetEntityCache.remove(id);
+    _assetEntityCache[id] = asset;
+    while (_assetEntityCache.length > _assetEntityCacheMaxEntries) {
+      _assetEntityCache.remove(_assetEntityCache.keys.first);
+    }
+  }
+
   NsfwMediaType? _toNsfwMediaType(AssetType type) {
     switch (type) {
       case AssetType.image:
@@ -2292,7 +2351,10 @@ class FlutterNsfwScaner {
     final boundedMax = math.max(boundedMin, maxChunkSize);
     var resolved = requestedChunkSize.clamp(boundedMin, boundedMax);
     final safeConcurrency = maxConcurrency.clamp(1, 12);
-    final minByConcurrency = (safeConcurrency * 3).clamp(boundedMin, boundedMax);
+    final minByConcurrency = (safeConcurrency * 3).clamp(
+      boundedMin,
+      boundedMax,
+    );
     if (resolved < minByConcurrency) {
       resolved = minByConcurrency;
     }
