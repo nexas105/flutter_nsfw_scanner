@@ -1,3 +1,12 @@
+## 1.1.6
+
+- Fixed iOS whole-gallery video regressions where many videos were effectively evaluated with a single non-decodable frame (`sampledFrames=1`, `maxNsfwScore=0.0`) despite valid paths.
+- Improved iOS gallery video path handling by avoiding unreliable direct PhotoData paths and materializing to app-owned local cache when needed.
+- Added stricter iOS video scan validation so assets with zero decodable frames now return explicit errors instead of being silently treated as clean.
+- Added gallery video trace diagnostics (`gallery_video_trace`) to speed up production troubleshooting of video scan/resolve behavior.
+- Added upload-path diagnostics for video resolve in the Normani/Harami pipeline.
+- Fixed iOS Swift compiler issue from non-optional `cacheKey` conditional binding.
+
 ## 1.1.5
 
 - Stabilized upload state persistence so upload queues and staged files now use a durable application-support directory instead of temporary storage.
