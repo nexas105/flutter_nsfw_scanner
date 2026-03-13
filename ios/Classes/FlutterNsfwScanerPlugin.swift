@@ -2377,6 +2377,7 @@ private final class IOSNsfwScanner {
         thumbnailSize: thumbnailSize,
         context: galleryContext,
         scanId: scanId,
+        onEvent: onEvent,
         isCancelled: isCancelled,
         includeCleanResults: includeCleanResults,
         debugLogging: debugLogging,
@@ -2499,6 +2500,7 @@ private final class IOSNsfwScanner {
             thumbnailSize: thumbnailSize,
             context: galleryContext,
             scanId: "\(scanId)_retry_\(pass)",
+            onEvent: onEvent,
             isCancelled: isCancelled,
             includeCleanResults: includeCleanResults,
             debugLogging: debugLogging,
@@ -2584,6 +2586,7 @@ private final class IOSNsfwScanner {
     thumbnailSize: Int,
     context: GalleryScanContext,
     scanId: String,
+    onEvent: @escaping ([String: Any]) -> Void,
     isCancelled: @escaping () -> Bool,
     includeCleanResults: Bool,
     debugLogging: Bool,
@@ -2693,6 +2696,18 @@ private final class IOSNsfwScanner {
                   onProgress: { _ in },
                   isCancelled: isCancelled
                 )
+                onEvent(
+                  self.buildGalleryVideoTracePayload(
+                    scanId: scanId,
+                    assetId: item.assetId,
+                    path: videoPath,
+                    isNsfw: videoResult["isNsfw"] as? Bool ?? false,
+                    maxNsfwScore: videoResult["maxNsfwScore"] as? Double ?? 0,
+                    flaggedFrames: videoResult["flaggedFrames"] as? Int ?? 0,
+                    sampledFrames: videoResult["sampledFrames"] as? Int ?? 0,
+                    error: nil
+                  )
+                )
                 payload = self.buildGalleryItemPayload(
                   assetId: item.assetId,
                   uri: identityPath,
@@ -2711,6 +2726,18 @@ private final class IOSNsfwScanner {
                 ) else {
                   throw error
                 }
+                onEvent(
+                  self.buildGalleryVideoTracePayload(
+                    scanId: scanId,
+                    assetId: item.assetId,
+                    path: identityPath,
+                    isNsfw: videoFallbackResult["isNsfw"] as? Bool ?? false,
+                    maxNsfwScore: videoFallbackResult["maxNsfwScore"] as? Double ?? 0,
+                    flaggedFrames: videoFallbackResult["flaggedFrames"] as? Int ?? 0,
+                    sampledFrames: videoFallbackResult["sampledFrames"] as? Int ?? 0,
+                    error: nil
+                  )
+                )
                 payload = self.buildGalleryItemPayload(
                   assetId: item.assetId,
                   uri: identityPath,
@@ -2813,6 +2840,20 @@ private final class IOSNsfwScanner {
             }
             if debugLogging {
               NSLog("[flutter_nsfw_scaner][gallery:\(scanId)] item=\(item.type) asset=\(item.assetId) error=\((error as NSError).localizedDescription)")
+            }
+            if item.type == "video" {
+              onEvent(
+                self.buildGalleryVideoTracePayload(
+                  scanId: scanId,
+                  assetId: item.assetId,
+                  path: "ph://\(item.assetId)",
+                  isNsfw: false,
+                  maxNsfwScore: 0,
+                  flaggedFrames: 0,
+                  sampledFrames: 0,
+                  error: (error as NSError).localizedDescription
+                )
+              )
             }
             if deferRetryableFailures && self.isRetryableGalleryAssetError(error) {
               retryLock.lock()
@@ -3600,6 +3641,29 @@ private final class IOSNsfwScanner {
       "successCount": successCount,
       "errorCount": errorCount,
       "flaggedCount": flaggedCount,
+    ]
+  }
+
+  private func buildGalleryVideoTracePayload(
+    scanId: String,
+    assetId: String,
+    path: String,
+    isNsfw: Bool,
+    maxNsfwScore: Double,
+    flaggedFrames: Int,
+    sampledFrames: Int,
+    error: String?
+  ) -> [String: Any] {
+    [
+      "eventType": "gallery_video_trace",
+      "scanId": scanId,
+      "assetId": assetId,
+      "path": path,
+      "isNsfw": isNsfw,
+      "maxNsfwScore": maxNsfwScore,
+      "flaggedFrames": flaggedFrames,
+      "sampledFrames": sampledFrames,
+      "error": error ?? NSNull(),
     ]
   }
 

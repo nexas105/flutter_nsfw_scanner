@@ -1290,6 +1290,21 @@ class FlutterNsfwScaner {
             return;
           }
 
+          if (eventType == 'gallery_video_trace') {
+            if (request.debugLogging) {
+              debugPrint(
+                '[gallery][video-trace] '
+                'asset=${event['assetId']} '
+                'path=${event['path']} '
+                'nsfw=${event['isNsfw']} '
+                'score=${event['maxNsfwScore']} '
+                'frames=${event['flaggedFrames']}/${event['sampledFrames']} '
+                'error=${event['error']}',
+              );
+            }
+            return;
+          }
+
           if (eventType == 'gallery_scan_progress') {
             final progress = NsfwScanProgress.fromMap(event);
             final resolvedType =
