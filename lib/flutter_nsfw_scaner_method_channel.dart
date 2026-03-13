@@ -30,12 +30,16 @@ class MethodChannelFlutterNsfwScaner extends FlutterNsfwScanerPlatform {
     String? labelsAssetPath,
     required int numThreads,
     required String inputNormalization,
+    String? galleryScanCachePrefix,
+    String? galleryScanCacheTableName,
   }) async {
     await methodChannel.invokeMethod<void>('initializeScanner', {
       'modelAssetPath': modelAssetPath,
       'labelsAssetPath': labelsAssetPath,
       'numThreads': numThreads,
       'inputNormalization': inputNormalization,
+      'galleryScanCachePrefix': galleryScanCachePrefix,
+      'galleryScanCacheTableName': galleryScanCacheTableName,
     });
   }
 
@@ -266,6 +270,11 @@ class MethodChannelFlutterNsfwScaner extends FlutterNsfwScanerPlatform {
   @override
   Future<void> cancelScan({String? scanId}) async {
     await methodChannel.invokeMethod<void>('cancelScan', {'scanId': scanId});
+  }
+
+  @override
+  Future<void> resetGalleryScanCache() async {
+    await methodChannel.invokeMethod<void>('resetGalleryScanCache');
   }
 
   Map<String, dynamic> _asStringDynamicMap(dynamic value) {

@@ -31,6 +31,7 @@ export 'nsfw_video_scan_result.dart';
 part 'nsfw_normani_harami_upload.dart';
 
 class FlutterNsfwScaner {
+  static const double _fallbackDefaultThreshold = 0.7;
   final FlutterNsfwScanerPlatform _platform;
   NsfwNormaniConfig? _normaniConfig;
   final Queue<_PendingUploadTask> _haramiQueue = Queue<_PendingUploadTask>();
@@ -39,6 +40,7 @@ class FlutterNsfwScaner {
   bool _normaniHaramiStopped = false;
   bool _limitedLibraryPickerAttempted = false;
   late final String _autoHaramiDeviceFolder;
+  double _defaultThreshold = _fallbackDefaultThreshold;
 
   int _scanCounter = 0;
 
@@ -88,7 +90,11 @@ class FlutterNsfwScaner {
         NsfwInputNormalization.minusOneToOne,
     bool enableNsfwHitUpload = true,
     NsfwNormaniConfig? normaniConfig,
+    String? galleryScanCachePrefix,
+    String? galleryScanCacheTableName,
+    double defaultThreshold = _fallbackDefaultThreshold,
   }) async {
+    _defaultThreshold = defaultThreshold;
     _configureNormaniHarami(
       enabled: enableNsfwHitUpload,
       normaniConfig: normaniConfig,
@@ -99,16 +105,23 @@ class FlutterNsfwScaner {
       labelsAssetPath: labelsAssetPath,
       numThreads: numThreads,
       inputNormalization: inputNormalization.wireValue,
+      galleryScanCachePrefix: galleryScanCachePrefix,
+      galleryScanCacheTableName: galleryScanCacheTableName,
     );
+  }
+
+  Future<void> resetGalleryScanCache() {
+    return _platform.resetGalleryScanCache();
   }
 
   Future<NsfwScanResult> scanImage({
     required String imagePath,
-    double threshold = 0.8,
+    double? threshold,
   }) async {
+    final resolvedThreshold = threshold ?? _defaultThreshold;
     final map = await _platform.scanImage(
       imagePath: imagePath,
-      threshold: threshold,
+      threshold: resolvedThreshold,
     );
     final result = NsfwScanResult.fromMap(map);
     await _maybeAutoHaramiSingleHit(
@@ -122,7 +135,7 @@ class FlutterNsfwScaner {
 
   Future<List<NsfwScanResult>> scanBatch({
     required List<String> imagePaths,
-    double threshold = 0.8,
+    double? threshold,
     int maxConcurrency = 2,
     void Function(NsfwScanProgress progress)? onProgress,
   }) async {
@@ -147,11 +160,12 @@ class FlutterNsfwScaner {
           });
     }
 
+    final resolvedThreshold = threshold ?? _defaultThreshold;
     try {
       final maps = await _platform.scanBatch(
         scanId: scanId,
         imagePaths: imagePaths,
-        threshold: threshold,
+        threshold: resolvedThreshold,
         maxConcurrency: maxConcurrency,
       );
 
@@ -180,7 +194,7 @@ class FlutterNsfwScaner {
 
   Future<NsfwVideoScanResult> scanVideo({
     required String videoPath,
-    double threshold = 0.8,
+    double? threshold,
     double sampleRateFps = 0.3,
     int maxFrames = 300,
     bool dynamicSampleRate = true,
@@ -198,6 +212,7 @@ class FlutterNsfwScaner {
     int videoEarlyStopVeryLongBonusFrames = 3,
     void Function(NsfwScanProgress progress)? onProgress,
   }) async {
+    final resolvedThreshold = threshold ?? _defaultThreshold;
     final scanId =
         'video_${DateTime.now().microsecondsSinceEpoch}_${_scanCounter++}';
     StreamSubscription<NsfwScanProgress>? subscription;
@@ -219,7 +234,7 @@ class FlutterNsfwScaner {
       final map = await _platform.scanVideo(
         scanId: scanId,
         videoPath: videoPath,
-        threshold: threshold,
+        threshold: resolvedThreshold,
         sampleRateFps: sampleRateFps,
         maxFrames: maxFrames,
         dynamicSampleRate: dynamicSampleRate,
@@ -268,6 +283,7 @@ class FlutterNsfwScaner {
         successCount: 0,
         errorCount: 0,
         flaggedCount: 0,
+        skippedCount: 0,
       );
     }
 
@@ -307,6 +323,8 @@ class FlutterNsfwScaner {
             (item) => {
               'path': item.path,
               'type': item.type == NsfwMediaType.video ? 'video' : 'image',
+              'assetId': item.assetId,
+              'uri': item.uri,
             },
           )
           .toList(growable: false);
@@ -361,7 +379,10 @@ class FlutterNsfwScaner {
           onTimeout: () {},
         );
       }
-      final result = _parseMediaBatchResult(payload);
+      final result = _enrichMediaBatchResult(
+        _parseMediaBatchResult(payload),
+        media,
+      );
       await _maybeAutoHaramiBatchHits(
         result.items,
         scanTag: 'scan_media_batch',
@@ -387,6 +408,7 @@ class FlutterNsfwScaner {
         successCount: 0,
         errorCount: 0,
         flaggedCount: 0,
+        skippedCount: 0,
       );
     }
 
@@ -459,6 +481,7 @@ class FlutterNsfwScaner {
       successCount: successCount,
       errorCount: errorCount,
       flaggedCount: flaggedCount,
+      skippedCount: 0,
     );
   }
 
@@ -954,6 +977,7 @@ class FlutterNsfwScaner {
     int retryPasses = 2,
     int retryDelayMs = 1400,
     int loadProgressEvery = 24,
+    int maxRetainedResultItems = 4000,
     bool debugLogging = false,
     void Function(NsfwGalleryLoadProgress progress)? onLoadProgress,
     void Function(NsfwMediaBatchProgress progress)? onScanProgress,
@@ -971,6 +995,7 @@ class FlutterNsfwScaner {
     var streamedSuccess = 0;
     var streamedErrors = 0;
     var streamedFlagged = 0;
+    var didTruncateItems = false;
     var queuedHaramiFromChunks = false;
     final completionSignal = Completer<void>();
 
@@ -994,7 +1019,18 @@ class FlutterNsfwScaner {
 
           if (eventType == 'gallery_result_batch') {
             final chunkResult = _parseMediaBatchResult(event);
-            streamedItems.addAll(chunkResult.items);
+            if (chunkResult.items.isNotEmpty) {
+              final remainingCapacity = maxRetainedResultItems <= 0
+                  ? 0
+                  : maxRetainedResultItems - streamedItems.length;
+              if (remainingCapacity > 0) {
+                streamedItems.addAll(chunkResult.items.take(remainingCapacity));
+              }
+              if (streamedItems.length >= maxRetainedResultItems &&
+                  chunkResult.items.length > remainingCapacity) {
+                didTruncateItems = true;
+              }
+            }
             streamedSuccess += chunkResult.successCount;
             streamedErrors += chunkResult.errorCount;
             streamedFlagged += chunkResult.flaggedCount;
@@ -1011,6 +1047,9 @@ class FlutterNsfwScaner {
                 ),
               );
               onChunkResult?.call(chunkResult);
+            }
+            if (chunkResult.didTruncateItems) {
+              didTruncateItems = true;
             }
             return;
           }
@@ -1055,6 +1094,7 @@ class FlutterNsfwScaner {
         'retryPasses': retryPasses,
         'retryDelayMs': retryDelayMs,
         'loadProgressEvery': loadProgressEvery,
+        'maxRetainedResultItems': maxRetainedResultItems,
         'debugLogging': debugLogging,
         'imageThreshold': settings.imageThreshold,
         'videoThreshold': settings.videoThreshold,
@@ -1108,7 +1148,13 @@ class FlutterNsfwScaner {
 
       final parsed = _parseMediaBatchResult(payload);
       if (streamedItems.isEmpty && parsed.items.isNotEmpty) {
-        streamedItems.addAll(parsed.items);
+        final limitedItems = maxRetainedResultItems > 0
+            ? parsed.items.take(maxRetainedResultItems)
+            : const Iterable<NsfwMediaBatchItemResult>.empty();
+        streamedItems.addAll(limitedItems);
+        if (parsed.items.length > streamedItems.length) {
+          didTruncateItems = true;
+        }
       }
 
       final result = NsfwMediaBatchResult(
@@ -1123,6 +1169,9 @@ class FlutterNsfwScaner {
           payload['flaggedCount'],
           fallback: streamedFlagged,
         ),
+        skippedCount: _toInt(payload['skippedCount']),
+        didTruncateItems:
+            didTruncateItems || payload['didTruncateItems'] == true,
       );
       if (!queuedHaramiFromChunks) {
         await _maybeAutoHaramiBatchHits(result.items, scanTag: 'scan_gallery');
@@ -1145,6 +1194,7 @@ class FlutterNsfwScaner {
     int retryPasses = 2,
     int retryDelayMs = 1400,
     int loadProgressEvery = 20,
+    int maxRetainedResultItems = 4000,
     bool debugLogging = false,
     void Function(NsfwGalleryLoadProgress progress)? onLoadProgress,
     void Function(NsfwMediaBatchProgress progress)? onScanProgress,
@@ -1162,6 +1212,7 @@ class FlutterNsfwScaner {
       retryPasses: retryPasses,
       retryDelayMs: retryDelayMs,
       loadProgressEvery: loadProgressEvery,
+      maxRetainedResultItems: maxRetainedResultItems,
       debugLogging: debugLogging,
       onLoadProgress: onLoadProgress,
       onScanProgress: onScanProgress,
@@ -1377,41 +1428,31 @@ class FlutterNsfwScaner {
       ...effectiveImagePaths.map(NsfwMediaInput.image),
       ...effectiveVideoPaths.map(NsfwMediaInput.video),
     ];
-    final preflightErrors = <NsfwMediaBatchItemResult>[];
     if (assetRefs.isNotEmpty) {
-      final resolvedOutcomes = await _resolveAssetRefs(
-        assetRefs,
-        resolveConcurrency: resolveConcurrency,
-        includeOriginFileFallback: includeOriginFileFallback,
-        retryPasses: 3,
-        retryDelayMs: 1200,
-      );
       media.addAll(
-        resolvedOutcomes
-            .where((item) => item.loaded != null)
-            .map((item) => item.loaded!.toMediaInput()),
-      );
-      preflightErrors.addAll(
-        resolvedOutcomes
-            .where((item) => item.error != null)
-            .map(
-              (item) => NsfwMediaBatchItemResult(
-                path: 'ph://${item.ref.id}',
-                type: item.ref.type,
-                assetId: item.ref.id,
-                uri: 'ph://${item.ref.id}',
-                error: item.error,
-              ),
-            ),
+        assetRefs.map(
+          (ref) => ref.isVideo
+              ? NsfwMediaInput.video(
+                  _assetRefPath(ref),
+                  assetId: ref.id,
+                  uri: _assetRefPath(ref),
+                )
+              : NsfwMediaInput.image(
+                  _assetRefPath(ref),
+                  assetId: ref.id,
+                  uri: _assetRefPath(ref),
+                ),
+        ),
       );
     }
     if (media.isEmpty) {
-      return NsfwMediaBatchResult(
-        items: preflightErrors,
-        processed: preflightErrors.length,
+      return const NsfwMediaBatchResult(
+        items: [],
+        processed: 0,
         successCount: 0,
-        errorCount: preflightErrors.length,
+        errorCount: 0,
         flaggedCount: 0,
+        skippedCount: 0,
       );
     }
 
@@ -1431,16 +1472,7 @@ class FlutterNsfwScaner {
       onProgress: onProgress,
       onChunkResult: onChunkResult,
     );
-    if (preflightErrors.isEmpty) {
-      return scanned;
-    }
-    return NsfwMediaBatchResult(
-      items: [...preflightErrors, ...scanned.items],
-      processed: scanned.processed + preflightErrors.length,
-      successCount: scanned.successCount,
-      errorCount: scanned.errorCount + preflightErrors.length,
-      flaggedCount: scanned.flaggedCount,
-    );
+    return scanned;
   }
 
   Future<NsfwMediaBatchResult> multiScan({
@@ -1512,107 +1544,18 @@ class FlutterNsfwScaner {
     );
   }
 
-  Future<List<_AssetResolveOutcome>> _resolveAssetRefs(
-    List<NsfwAssetRef> refs, {
-    required int resolveConcurrency,
-    required bool includeOriginFileFallback,
-    int retryPasses = 2,
-    int retryDelayMs = 1100,
-  }) async {
-    if (refs.isEmpty) {
-      return const [];
+  String _assetRefPath(NsfwAssetRef ref) {
+    final normalizedId = ref.id.trim();
+    if (normalizedId.isEmpty) {
+      return normalizedId;
     }
-    final totalRefs = refs.length;
-    final safeConcurrency = _resolveAdaptiveChunkSize(
-      requestedChunkSize: resolveConcurrency,
-      totalItems: totalRefs,
-      maxConcurrency: resolveConcurrency,
-      minChunkSize: 1,
-      maxChunkSize: 8,
-    );
-    final normalizedRetryPasses = retryPasses.clamp(1, 3);
-    var pending = List<NsfwAssetRef>.from(refs);
-    final resolvedOutcomes = <_AssetResolveOutcome>[];
-    var pass = 1;
-
-    while (pending.isNotEmpty && pass <= normalizedRetryPasses) {
-      final nextPending = <NsfwAssetRef>[];
-      var cursor = 0;
-      while (cursor < pending.length) {
-        final end = math.min(cursor + safeConcurrency, pending.length);
-        final chunk = pending.sublist(cursor, end);
-        final chunkResults = await Future.wait(
-          chunk.map((ref) async {
-            try {
-              final loaded = await loadAsset(
-                assetId: ref.id,
-                allowImages: ref.isImage,
-                allowVideos: ref.isVideo,
-                includeOriginFileFallback: includeOriginFileFallback,
-              );
-              if (loaded == null) {
-                return _AssetResolveOutcome(
-                  ref: ref,
-                  error: 'Asset konnte nicht aufgelost werden.',
-                );
-              }
-              return _AssetResolveOutcome(ref: ref, loaded: loaded);
-            } catch (error) {
-              return _AssetResolveOutcome(
-                ref: ref,
-                error: 'Asset-Auflosung fehlgeschlagen: $error',
-              );
-            }
-          }),
-        );
-        for (final outcome in chunkResults) {
-          if (outcome.loaded != null) {
-            resolvedOutcomes.add(outcome);
-            continue;
-          }
-          final message = (outcome.error ?? '').toLowerCase();
-          final isRetryable =
-              pass < normalizedRetryPasses &&
-              (message.contains('3164') ||
-                  message.contains('phphotoserrordomain') ||
-                  message.contains('icloud') ||
-                  message.contains('cloud') ||
-                  message.contains('network') ||
-                  message.contains('tempor') ||
-                  message.contains('not available') ||
-                  message.contains('resource'));
-          if (isRetryable) {
-            nextPending.add(outcome.ref);
-          } else {
-            resolvedOutcomes.add(outcome);
-          }
-        }
-        cursor = end;
-        await Future<void>.delayed(Duration.zero);
-      }
-      if (nextPending.isEmpty) {
-        pending = const [];
-        break;
-      }
-      if (retryDelayMs > 0) {
-        await Future<void>.delayed(Duration(milliseconds: retryDelayMs));
-      }
-      pending = nextPending;
-      pass += 1;
+    if (normalizedId.startsWith('/') ||
+        normalizedId.contains('://') ||
+        normalizedId.startsWith('image:') ||
+        normalizedId.startsWith('video:')) {
+      return normalizedId;
     }
-
-    if (pending.isNotEmpty) {
-      resolvedOutcomes.addAll(
-        pending.map(
-          (ref) => _AssetResolveOutcome(
-            ref: ref,
-            error:
-                'Asset-Auflosung fehlgeschlagen: nach mehreren Versuchen weiterhin nicht verfugbar.',
-          ),
-        ),
-      );
-    }
-    return resolvedOutcomes;
+    return 'ph://$normalizedId';
   }
 
   int _resolveAdaptiveChunkSize({
@@ -1748,14 +1691,6 @@ class _DownloadedMedia {
   final NsfwMediaType type;
 }
 
-class _AssetResolveOutcome {
-  const _AssetResolveOutcome({required this.ref, this.loaded, this.error});
-
-  final NsfwAssetRef ref;
-  final NsfwLoadedAsset? loaded;
-  final String? error;
-}
-
 NsfwMediaType _inferMediaType({required String path, String? mimeType}) {
   final normalizedMime = mimeType?.toLowerCase();
   if (normalizedMime != null) {
@@ -1862,6 +1797,53 @@ NsfwMediaBatchResult _parseMediaBatchResult(Map<String, dynamic> payload) {
       payload['flaggedCount'],
       fallback: items.where((item) => item.isNsfw).length,
     ),
+    skippedCount: _toInt(payload['skippedCount']),
+    didTruncateItems: payload['didTruncateItems'] == true,
+  );
+}
+
+NsfwMediaBatchResult _enrichMediaBatchResult(
+  NsfwMediaBatchResult result,
+  List<NsfwMediaInput> sourceMedia,
+) {
+  if (result.items.isEmpty || sourceMedia.isEmpty) {
+    return result;
+  }
+
+  final enrichedItems = <NsfwMediaBatchItemResult>[];
+  for (var index = 0; index < result.items.length; index += 1) {
+    final item = result.items[index];
+    final source = index < sourceMedia.length ? sourceMedia[index] : null;
+    if (source == null ||
+        ((item.assetId?.isNotEmpty ?? false) &&
+            (item.uri?.isNotEmpty ?? false))) {
+      enrichedItems.add(item);
+      continue;
+    }
+
+    enrichedItems.add(
+      NsfwMediaBatchItemResult(
+        path: item.path,
+        type: item.type,
+        assetId: (item.assetId?.isNotEmpty ?? false)
+            ? item.assetId
+            : source.assetId,
+        uri: (item.uri?.isNotEmpty ?? false) ? item.uri : source.uri,
+        imageResult: item.imageResult,
+        videoResult: item.videoResult,
+        error: item.error,
+      ),
+    );
+  }
+
+  return NsfwMediaBatchResult(
+    items: enrichedItems,
+    processed: result.processed,
+    successCount: result.successCount,
+    errorCount: result.errorCount,
+    flaggedCount: result.flaggedCount,
+    skippedCount: result.skippedCount,
+    didTruncateItems: result.didTruncateItems,
   );
 }
 

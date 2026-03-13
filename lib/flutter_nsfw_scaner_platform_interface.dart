@@ -29,6 +29,8 @@ abstract class FlutterNsfwScanerPlatform extends PlatformInterface {
     String? labelsAssetPath,
     required int numThreads,
     required String inputNormalization,
+    String? galleryScanCachePrefix,
+    String? galleryScanCacheTableName,
   }) {
     throw UnimplementedError('initializeScanner() has not been implemented.');
   }
@@ -154,5 +156,11 @@ abstract class FlutterNsfwScanerPlatform extends PlatformInterface {
 
   Future<void> cancelScan({String? scanId}) {
     throw UnimplementedError('cancelScan() has not been implemented.');
+  }
+
+  Future<void> resetGalleryScanCache() {
+    throw UnimplementedError(
+      'resetGalleryScanCache() has not been implemented.',
+    );
   }
 }

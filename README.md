@@ -64,6 +64,9 @@ await scanner.initialize(
   labelsAssetPath: NsfwBuiltinModels.nsfwMobilenetV2140224Labels,
   numThreads: 2,
   inputNormalization: NsfwInputNormalization.minusOneToOne,
+  defaultThreshold: 0.7,
+  galleryScanCachePrefix: 'my_app',
+  galleryScanCacheTableName: 'gallery_scan_history',
 );
 
 final image = await scanner.scanImage(
@@ -84,6 +87,7 @@ final gallery = await scanner.scanWholeGallery(
   includeVideos: true,
   pageSize: 140,
   scanChunkSize: 80,
+  maxRetainedResultItems: 4000,
   includeCleanResults: false,
   debugLogging: true,
   settings: const NsfwMediaBatchSettings(
@@ -103,6 +107,59 @@ final gallery = await scanner.scanWholeGallery(
 );
 
 print('flagged=${gallery.flaggedCount}, errors=${gallery.errorCount}');
+print('skipped=${gallery.skippedCount}');
+print('truncated=${gallery.didTruncateItems}');
+```
+
+## Whole-gallery scan cache
+
+If you want `scanWholeGallery(...)` / `scanGallery(...)` to skip assets that were already scanned in earlier runs, configure the native cache once during `initialize(...)`:
+
+```dart
+await scanner.initialize(
+  modelAssetPath: NsfwBuiltinModels.nsfwMobilenetV2140224,
+  labelsAssetPath: NsfwBuiltinModels.nsfwMobilenetV2140224Labels,
+  galleryScanCachePrefix: 'my_app',
+  galleryScanCacheTableName: 'gallery_scan_history',
+);
+```
+
+Notes:
+- The cache is stored in native SQLite inside the app sandbox.
+- Cache identity is based on the native gallery asset id.
+- Only successful whole-gallery scan items are written to the cache.
+- `processed` includes skipped items, and `skippedCount` tells you how many were avoided because they were already cached.
+- If either `galleryScanCachePrefix` or `galleryScanCacheTableName` is omitted/empty, the cache is disabled.
+- For very large libraries, whole-gallery scans retain at most `maxRetainedResultItems` in the final `items` list to avoid memory pressure. The full scan still runs, counters remain correct, and `onChunkResult` still streams every chunk.
+- If retained items were capped, `didTruncateItems` is `true`.
+
+## Default threshold
+
+You can define the default scan threshold during `initialize(...)`:
+
+```dart
+await scanner.initialize(
+  modelAssetPath: NsfwBuiltinModels.nsfwMobilenetV2140224,
+  defaultThreshold: 0.7,
+);
+```
+
+Notes:
+- The default is `0.7`.
+- `scanImage(...)`, `scanBatch(...)`, and `scanVideo(...)` use this initialized default when you do not pass `threshold`.
+- You can still override the threshold per scan call:
+
+```dart
+final image = await scanner.scanImage(
+  imagePath: '/path/image.jpg',
+  threshold: 0.45,
+);
+```
+
+Reset the cache for the currently initialized scanner:
+
+```dart
+await scanner.resetGalleryScanCache();
 ```
 
 ## Asset preview APIs (for gallery UIs)
@@ -163,6 +220,7 @@ All widgets are optional and composable. They are not hard-wired into scan logic
 - `scanGallery(...) -> NsfwMediaBatchResult`
 - `scanMedia(...) -> NsfwMediaBatchItemResult`
 - `scanMultipleMedia(...) -> NsfwMediaBatchResult`
+- `resetGalleryScanCache()`
 - `loadAsset(...) -> NsfwLoadedAsset?`
 - `loadMultipleAssets(...) -> List<NsfwAssetRef>`
 - `loadMultipleWithRange(...) -> NsfwAssetPage`

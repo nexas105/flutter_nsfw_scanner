@@ -4,6 +4,7 @@ import TensorFlowLite
 import ImageIO
 import Photos
 import PhotosUI
+import SQLite3
 import UniformTypeIdentifiers
 import UIKit
 
@@ -21,6 +22,8 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
   private var pendingPickerAllowImages = true
   private var pendingPickerAllowVideos = true
   private var pendingPickerMultiple = false
+  private var galleryScanCachePrefix: String?
+  private var galleryScanCacheTableName: String?
 
   private init(registrar: FlutterPluginRegistrar) {
     self.registrar = registrar
@@ -85,6 +88,8 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
       listGalleryAssets(call, result: result)
     case "cancelScan":
       cancelScan(call, result: result)
+    case "resetGalleryScanCache":
+      resetGalleryScanCache(result: result)
     case "disposeScanner":
       disposeScanner(result: result)
     default:
@@ -109,14 +114,23 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
         let inputNormalization = InputNormalizationMode(
           wireValue: (args["inputNormalization"] as? String) ?? ""
         )
+        let galleryScanCachePrefix = (args["galleryScanCachePrefix"] as? String)?
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        let galleryScanCacheTableName = (args["galleryScanCacheTableName"] as? String)?
+          .trimmingCharacters(in: .whitespacesAndNewlines)
 
         let newScanner = try IOSNsfwScanner(
           registrar: self.registrar,
           modelAssetPath: modelAssetPath,
           labelsAssetPath: labelsAssetPath,
           numThreads: numThreads,
-          inputNormalization: inputNormalization
+          inputNormalization: inputNormalization,
+          galleryScanCachePrefix: galleryScanCachePrefix,
+          galleryScanCacheTableName: galleryScanCacheTableName
         )
+
+        self.galleryScanCachePrefix = galleryScanCachePrefix
+        self.galleryScanCacheTableName = galleryScanCacheTableName
 
         self.scannerLock.lock()
         self.scanner = newScanner
@@ -208,6 +222,26 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
       self.scanner = nil
       self.scannerLock.unlock()
       self.dispatchResult(result, value: nil)
+    }
+  }
+
+  private func resetGalleryScanCache(result: @escaping FlutterResult) {
+    workerQueue.async {
+      do {
+        let prefix = self.galleryScanCachePrefix?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tableName = self.galleryScanCacheTableName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let store = try GalleryScanHistoryStore(
+          prefix: prefix,
+          tableName: tableName
+        ) else {
+          self.dispatchResult(result, value: nil)
+          return
+        }
+        try store.reset()
+        self.dispatchResult(result, value: nil)
+      } catch {
+        self.dispatchError(result, code: "RESET_GALLERY_SCAN_CACHE_FAILED", error: error)
+      }
     }
   }
 
@@ -679,6 +713,8 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
         }
 
         let options = PHFetchOptions()
+        options.includeHiddenAssets = true
+        options.includeAllBurstAssets = true
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         let fetched = PHAsset.fetchAssets(with: options)
         var items = [[String: Any]]()
@@ -1070,6 +1106,145 @@ private struct NativeMediaItem {
   let type: String
 }
 
+private final class GalleryScanHistoryStore {
+  private let dbURL: URL
+  private let tableName: String
+  private let lock = NSLock()
+
+  init?(prefix: String?, tableName: String?) throws {
+    let normalizedPrefix = GalleryScanHistoryStore.sanitizeFileComponent(prefix)
+    let normalizedTableName = GalleryScanHistoryStore.sanitizeIdentifier(tableName)
+    guard let normalizedPrefix, let normalizedTableName else {
+      return nil
+    }
+    self.tableName = normalizedTableName
+    let baseDirectory = try FileManager.default.url(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask,
+      appropriateFor: nil,
+      create: true
+    ).appendingPathComponent("flutter_nsfw_scaner", isDirectory: true)
+    try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+    self.dbURL = baseDirectory.appendingPathComponent("\(normalizedPrefix)_gallery_scan_cache.sqlite")
+    try initialize()
+  }
+
+  func hasScanned(assetId: String) throws -> Bool {
+    try lock.withLock {
+      let db = try openDatabase()
+      defer { sqlite3_close(db) }
+
+      let sql = "SELECT 1 FROM \(tableName) WHERE asset_id = ? LIMIT 1;"
+      var statement: OpaquePointer?
+      guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+        throw lastError(db)
+      }
+      defer { sqlite3_finalize(statement) }
+      sqlite3_bind_text(statement, 1, assetId, -1, SQLITE_TRANSIENT)
+      return sqlite3_step(statement) == SQLITE_ROW
+    }
+  }
+
+  func markScanned(assetId: String) throws {
+    try lock.withLock {
+      let db = try openDatabase()
+      defer { sqlite3_close(db) }
+
+      let sql = """
+        INSERT INTO \(tableName) (asset_id, scanned_at_epoch_ms)
+        VALUES (?, ?)
+        ON CONFLICT(asset_id) DO UPDATE SET scanned_at_epoch_ms = excluded.scanned_at_epoch_ms;
+        """
+      var statement: OpaquePointer?
+      guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+        throw lastError(db)
+      }
+      defer { sqlite3_finalize(statement) }
+      sqlite3_bind_text(statement, 1, assetId, -1, SQLITE_TRANSIENT)
+      sqlite3_bind_int64(statement, 2, Int64(Date().timeIntervalSince1970 * 1000))
+      guard sqlite3_step(statement) == SQLITE_DONE else {
+        throw lastError(db)
+      }
+    }
+  }
+
+  func reset() throws {
+    try lock.withLock {
+      let db = try openDatabase()
+      defer { sqlite3_close(db) }
+      let sql = "DELETE FROM \(tableName);"
+      guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+        throw lastError(db)
+      }
+    }
+  }
+
+  private func initialize() throws {
+    let db = try openDatabase()
+    defer { sqlite3_close(db) }
+    let sql = """
+      CREATE TABLE IF NOT EXISTS \(tableName) (
+        asset_id TEXT PRIMARY KEY NOT NULL,
+        scanned_at_epoch_ms INTEGER NOT NULL
+      );
+      """
+    guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+      throw lastError(db)
+    }
+  }
+
+  private func openDatabase() throws -> OpaquePointer? {
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(
+      dbURL.path,
+      &db,
+      SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+      nil
+    ) == SQLITE_OK else {
+      if let db {
+        defer { sqlite3_close(db) }
+        throw lastError(db)
+      }
+      throw ScannerError.invalidArgument("Failed to open gallery scan cache database.")
+    }
+    return db
+  }
+
+  private func lastError(_ db: OpaquePointer?) -> Error {
+    let message = db.flatMap { sqlite3_errmsg($0) }.map { String(cString: $0) }
+      ?? "Unknown SQLite error"
+    return ScannerError.invalidArgument(message)
+  }
+
+  private static func sanitizeIdentifier(_ rawValue: String?) -> String? {
+    let normalized = (rawValue ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .replacingOccurrences(
+        of: "[^A-Za-z0-9_]+",
+        with: "_",
+        options: .regularExpression
+      )
+      .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+    guard !normalized.isEmpty else { return nil }
+    if let first = normalized.first, first.isNumber {
+      return "t_\(normalized)"
+    }
+    return normalized
+  }
+
+  private static func sanitizeFileComponent(_ rawValue: String?) -> String? {
+    let normalized = (rawValue ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .replacingOccurrences(
+        of: "[^A-Za-z0-9._-]+",
+        with: "_",
+        options: .regularExpression
+      )
+      .trimmingCharacters(in: CharacterSet(charactersIn: "._-"))
+    return normalized.isEmpty ? nil : normalized
+  }
+}
+
 private final class IOSNsfwScanner {
   private let modelData: Data
   private let labels: [String]
@@ -1090,18 +1265,25 @@ private final class IOSNsfwScanner {
   private let inputChannels: Int
   private let outputElementCount: Int
   private let inputNormalizationMode: InputNormalizationMode
+  private let galleryScanHistoryStore: GalleryScanHistoryStore?
 
   init(
     registrar: FlutterPluginRegistrar,
     modelAssetPath: String,
     labelsAssetPath: String?,
     numThreads: Int,
-    inputNormalization: InputNormalizationMode
+    inputNormalization: InputNormalizationMode,
+    galleryScanCachePrefix: String?,
+    galleryScanCacheTableName: String?
   ) throws {
     self.modelData = try IOSNsfwScanner.loadAssetData(registrar: registrar, path: modelAssetPath)
     self.labels = try labelsAssetPath.map { try IOSNsfwScanner.loadLabels(registrar: registrar, path: $0) } ?? []
     self.numThreads = numThreads
     self.inputNormalizationMode = inputNormalization
+    self.galleryScanHistoryStore = try GalleryScanHistoryStore(
+      prefix: galleryScanCachePrefix,
+      tableName: galleryScanCacheTableName
+    )
 
     let probe = try IOSNsfwScanner.createInterpreter(modelData: modelData, numThreads: numThreads)
     try probe.allocateTensors()
@@ -1663,9 +1845,10 @@ private final class IOSNsfwScanner {
           }
           let payload: [String: Any]
           if item.type == "video" {
+            let resolvedVideoPath = try self.resolveVideoScanPath(from: item.path)
             let videoResult = try self.scanVideo(
               scanId: "\(scanId)_item_\(index)",
-              videoPath: item.path,
+              videoPath: resolvedVideoPath,
               threshold: videoThreshold,
               sampleRateFps: videoSampleRateFps,
               maxFrames: videoMaxFrames,
@@ -1702,9 +1885,9 @@ private final class IOSNsfwScanner {
             guard let imageInterpreter = borrowedImageInterpreter else {
               throw ScannerError.invalidArgument("No interpreter available")
             }
-            let imageResult = try self.runSingleScan(
+            let imageResult = try self.runImageScan(
               interpreter: imageInterpreter,
-              imagePath: item.path,
+              assetRefOrPath: item.path,
               threshold: imageThreshold
             )
             payload = [
@@ -1881,6 +2064,7 @@ private final class IOSNsfwScanner {
     let retryPasses = ((settings["retryPasses"] as? NSNumber)?.intValue ?? 2).clamped(to: 1...3)
     let retryDelayMs = ((settings["retryDelayMs"] as? NSNumber)?.intValue ?? 1400).clamped(to: 0...10000)
     let loadProgressEvery = ((settings["loadProgressEvery"] as? NSNumber)?.intValue ?? 100).clamped(to: 20...500)
+    let maxRetainedResultItems = max(0, (settings["maxRetainedResultItems"] as? NSNumber)?.intValue ?? 4000)
     let maxItemsRaw = (settings["maxItems"] as? NSNumber)?.intValue
     let maxItems = (maxItemsRaw ?? 0) > 0 ? maxItemsRaw! : nil
     let cpuWorkers = max(1, ProcessInfo.processInfo.activeProcessorCount)
@@ -1891,6 +2075,8 @@ private final class IOSNsfwScanner {
     }
 
     let fetchOptions = PHFetchOptions()
+    fetchOptions.includeHiddenAssets = true
+    fetchOptions.includeAllBurstAssets = true
     var predicates = [NSPredicate]()
     if includeImages {
       predicates.append(NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue))
@@ -1989,6 +2175,8 @@ private final class IOSNsfwScanner {
     var successTotal = 0
     var errorTotal = 0
     var flaggedTotal = 0
+    var skippedTotal = 0
+    var didTruncateItems = false
     var page = 0
     var pendingRetryAssets: [GalleryAssetItem] = []
 
@@ -2000,9 +2188,14 @@ private final class IOSNsfwScanner {
       if !outcome.deferredRetryItems.isEmpty {
         pendingRetryAssets.append(contentsOf: outcome.deferredRetryItems)
       }
-      if finalItems.count < 2000 && !outcome.streamedItems.isEmpty {
-        let remaining = 2000 - finalItems.count
-        finalItems.append(contentsOf: outcome.streamedItems.prefix(remaining))
+      if !outcome.streamedItems.isEmpty {
+        let remainingCapacity = max(0, maxRetainedResultItems - finalItems.count)
+        if remainingCapacity > 0 {
+          finalItems.append(contentsOf: outcome.streamedItems.prefix(remainingCapacity))
+        }
+        if outcome.streamedItems.count > remainingCapacity {
+          didTruncateItems = true
+        }
       }
 
       if !outcome.streamedItems.isEmpty {
@@ -2020,10 +2213,10 @@ private final class IOSNsfwScanner {
         )
       }
 
-      onEvent(
-        buildGalleryScanProgressPayload(
-          scanId: scanId,
-          processed: processedTotal,
+        onEvent(
+          buildGalleryScanProgressPayload(
+            scanId: scanId,
+          processed: processedTotal + skippedTotal,
           total: totalTarget,
           imagePath: nil,
           error: nil,
@@ -2097,6 +2290,11 @@ private final class IOSNsfwScanner {
       }
 
       scannedAssets += 1
+      if let galleryScanHistoryStore,
+         (try? galleryScanHistoryStore.hasScanned(assetId: asset.localIdentifier)) == true {
+        skippedTotal += 1
+        continue
+      }
       pendingBatch.append(
         GalleryAssetItem(
           asset: asset,
@@ -2209,7 +2407,7 @@ private final class IOSNsfwScanner {
     onEvent(
       buildGalleryScanProgressPayload(
         scanId: scanId,
-        processed: processedTotal,
+        processed: processedTotal + skippedTotal,
         total: totalTarget,
         imagePath: nil,
         error: nil,
@@ -2220,10 +2418,12 @@ private final class IOSNsfwScanner {
 
     let payload: [String: Any] = [
       "items": finalItems,
-      "processed": processedTotal,
+      "processed": processedTotal + skippedTotal,
       "successCount": successTotal,
       "errorCount": errorTotal,
       "flaggedCount": flaggedTotal,
+      "skippedCount": skippedTotal,
+      "didTruncateItems": didTruncateItems,
     ]
     if debugLogging {
       NSLog(
@@ -2462,6 +2662,8 @@ private final class IOSNsfwScanner {
               )
             }
 
+            try? self.galleryScanHistoryStore?.markScanned(assetId: item.assetId)
+
             resultLock.lock()
             orderedResults[index] = payload
             resultLock.unlock()
@@ -2620,6 +2822,44 @@ private final class IOSNsfwScanner {
       throw ScannerError.assetMissing("Asset not found: \(assetRef)")
     }
     return asset
+  }
+
+  private func resolveVideoScanPath(from assetRefOrPath: String) throws -> String {
+    if let localPath = resolveLocalFilePath(from: assetRefOrPath) {
+      return localPath
+    }
+    let asset = try resolvePhotoAsset(from: assetRefOrPath)
+    if let resolvedPath = resolveVideoPath(for: asset) {
+      return resolvedPath
+    }
+    return try resolveVideoAssetPath(asset: asset)
+  }
+
+  private func runImageScan(
+    interpreter: Interpreter,
+    assetRefOrPath: String,
+    threshold: Float
+  ) throws -> [String: Any] {
+    if let localPath = resolveLocalFilePath(from: assetRefOrPath) {
+      return try runSingleScan(
+        interpreter: interpreter,
+        imagePath: localPath,
+        threshold: threshold
+      )
+    }
+
+    let asset = try resolvePhotoAsset(from: assetRefOrPath)
+    let thumbnail = try requestThumbnailImage(
+      asset: asset,
+      manager: PHCachingImageManager(),
+      thumbnailSize: max(inputWidth, inputHeight)
+    )
+    return try runSingleScan(
+      interpreter: interpreter,
+      cgImage: thumbnail,
+      frameIdentity: assetRefOrPath,
+      threshold: threshold
+    )
   }
 
   private func normalizedLocalIdentifier(from assetRef: String) -> String {
@@ -3790,5 +4030,15 @@ private enum ScannerError: LocalizedError {
 private extension Comparable {
   func clamped(to limits: ClosedRange<Self>) -> Self {
     min(max(self, limits.lowerBound), limits.upperBound)
+  }
+}
+
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+private extension NSLock {
+  func withLock<T>(_ body: () throws -> T) rethrows -> T {
+    lock()
+    defer { unlock() }
+    return try body()
   }
 }

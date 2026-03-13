@@ -1,3 +1,12 @@
+## 1.1.2
+
+- Added optional native SQLite-backed whole-gallery scan history, configured via `initialize(..., galleryScanCachePrefix:, galleryScanCacheTableName:)`, so previously scanned assets can be skipped on later `scanWholeGallery` / `scanGallery` runs.
+- Added `resetGalleryScanCache()` to clear the configured whole-gallery scan history for the current scanner instance.
+- Added `skippedCount` to `NsfwMediaBatchResult` for whole-gallery runs that skip already-cached assets.
+- Added bounded whole-gallery result retention via `maxRetainedResultItems` plus `didTruncateItems`, so very large libraries do not keep unbounded result lists in memory.
+- Removed native whole-gallery result caps that previously truncated large iOS/Android result lists.
+- Expanded iOS whole-gallery asset discovery to explicitly include hidden assets and burst assets.
+
 ## 1.1.1
 
 - Improved iOS cloud-image materialization in whole-gallery scanning: image resolve now uses a full fallback chain (`requestImageDataAndOrientation` -> `PHAssetResourceManager` download -> rendered image export) instead of failing after a single data read path.
