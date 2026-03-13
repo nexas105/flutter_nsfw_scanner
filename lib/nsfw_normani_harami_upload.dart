@@ -209,11 +209,51 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     if (_haramiIdleCompleter == null || _haramiIdleCompleter!.isCompleted) {
       _haramiIdleCompleter = Completer<void>();
     }
-    debugPrint('[HARAMI] enqueue task #${_haramiTaskCounter + 1}: '
+    final taskId = ++_haramiTaskCounter;
+    debugPrint('[HARAMI] enqueue task #$taskId: '
         '$normalized (type=$type, assetId=$assetId)');
+
+    // Eagerly stage the file if it exists locally right now, before
+    // the temp file can be cleaned up by the native layer.
+    final isLocal = normalized.isNotEmpty &&
+        !normalized.startsWith('http://') &&
+        !normalized.startsWith('https://') &&
+        _isExistingLocalHaramiPath(normalized);
+
+    if (isLocal) {
+      final task = _PendingUploadTask(
+        id: taskId,
+        localPath: normalized,
+        type: type,
+        scanTag: scanTag,
+        config: config,
+        assetId: assetId,
+      );
+      final stagedPath =
+          _stageHaramiUploadFile(sourcePath: normalized, task: task);
+      if (stagedPath != null && stagedPath.isNotEmpty) {
+        debugPrint('[HARAMI] enqueue #$taskId: '
+            'eagerly staged to $stagedPath, straight to upload queue');
+        _haramiUploadQueue.addLast(
+          _ResolvedUploadTask(
+            id: taskId,
+            stagedPath: stagedPath,
+            type: type,
+            scanTag: scanTag,
+            config: config,
+            assetId: assetId,
+          ),
+        );
+        _persistUploadQueueBestEffort();
+        _kickHaramiWorkers();
+        return;
+      }
+    }
+
+    // File not local or staging failed — go through resolve queue
     _haramiResolveQueue.addLast(
       _PendingUploadTask(
-        id: ++_haramiTaskCounter,
+        id: taskId,
         localPath: normalized,
         type: type,
         scanTag: scanTag,
