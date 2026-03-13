@@ -748,6 +748,48 @@ void main() {
     await fakePlatform.close();
   });
 
+  test('waitForPendingUploads flushes queued hit uploads', () async {
+    final fakePlatform = MockFlutterNsfwScanerPlatform();
+    FlutterNsfwScanerPlatform.instance = fakePlatform;
+    final plugin = FlutterNsfwScaner();
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final requests = <String>[];
+    final tempDir = await Directory.systemTemp.createTemp('nsfw_upload_test');
+    final imageFile = File('${tempDir.path}/hit.jpg');
+    await imageFile.writeAsBytes(const [1, 2, 3, 4], flush: true);
+
+    unawaited(() async {
+      await for (final request in server) {
+        requests.add(request.uri.path);
+        await request.drain();
+        request.response.statusCode = 200;
+        await request.response.close();
+      }
+    }());
+
+    await plugin.initialize(
+      modelAssetPath: 'ignored.tflite',
+      enableNsfwHitUpload: true,
+      normaniConfig: NsfwNormaniConfig(
+        normaniUrl: 'http://127.0.0.1:${server.port}',
+        anonKey: 'anon',
+        bucket: 'bucket',
+      ),
+    );
+
+    final result = await plugin.scanImage(imagePath: imageFile.path);
+    expect(result.isNsfw, isTrue);
+
+    await plugin.waitForPendingUploads();
+
+    expect(requests, hasLength(1));
+    expect(requests.single, contains('/storage/v1/object/'));
+
+    await server.close(force: true);
+    await tempDir.delete(recursive: true);
+    await fakePlatform.close();
+  });
+
   test('scanMedia preserves asset references for video assets', () async {
     final fakePlatform = MockFlutterNsfwScanerPlatform();
     FlutterNsfwScanerPlatform.instance = fakePlatform;

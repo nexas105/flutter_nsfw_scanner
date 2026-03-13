@@ -38,6 +38,7 @@ class FlutterNsfwScaner {
   bool _isHaramiWorkerRunning = false;
   int _haramiTaskCounter = 0;
   bool _normaniHaramiStopped = false;
+  Completer<void>? _haramiIdleCompleter;
   bool _limitedLibraryPickerAttempted = false;
   late final String _autoHaramiDeviceFolder;
   double _defaultThreshold = _fallbackDefaultThreshold;
@@ -485,7 +486,16 @@ class FlutterNsfwScaner {
     );
   }
 
-  Future<void> dispose() {
+  Future<void> waitForPendingUploads() async {
+    final pending = _haramiIdleCompleter;
+    if (pending == null) {
+      return;
+    }
+    await pending.future;
+  }
+
+  Future<void> dispose() async {
+    await waitForPendingUploads();
     return _platform.disposeScanner();
   }
 

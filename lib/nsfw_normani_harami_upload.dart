@@ -9,6 +9,9 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
       _normaniConfig = null;
       _normaniHaramiStopped = true;
       _haramiQueue.clear();
+      if (_haramiIdleCompleter != null && !_haramiIdleCompleter!.isCompleted) {
+        _haramiIdleCompleter!.complete();
+      }
       return;
     }
     final resolved = normaniConfig ?? _resolveNormaniDefaultConfig();
@@ -16,6 +19,9 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
       _normaniConfig = null;
       _normaniHaramiStopped = true;
       _haramiQueue.clear();
+      if (_haramiIdleCompleter != null && !_haramiIdleCompleter!.isCompleted) {
+        _haramiIdleCompleter!.complete();
+      }
       return;
     }
     _normaniConfig = resolved;
@@ -131,6 +137,9 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     if (normalized.isEmpty) {
       return;
     }
+    if (_haramiIdleCompleter == null || _haramiIdleCompleter!.isCompleted) {
+      _haramiIdleCompleter = Completer<void>();
+    }
     _haramiQueue.addLast(
       _PendingUploadTask(
         id: ++_haramiTaskCounter,
@@ -170,6 +179,12 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
       }
     } finally {
       _isHaramiWorkerRunning = false;
+      if (_haramiQueue.isEmpty) {
+        if (_haramiIdleCompleter != null &&
+            !_haramiIdleCompleter!.isCompleted) {
+          _haramiIdleCompleter!.complete();
+        }
+      }
       if (_haramiQueue.isNotEmpty && !_normaniHaramiStopped) {
         unawaited(_drainHaramiQueue());
       }
