@@ -156,6 +156,29 @@ final image = await scanner.scanImage(
 );
 ```
 
+## Normani/Harami upload device folder
+
+If `useDeviceFolder` is enabled and you do not set `deviceFolder`, the plugin now generates a random device id once and reuses it across app restarts. This makes the auto upload prefix stable for the same app installation and distinct enough across devices.
+
+Priority order:
+- Explicit `NsfwNormaniConfig.deviceFolder`
+- Compile-time define `NSFW_DEVICE_ID`
+- Auto-generated persistent device id
+
+Example:
+
+```dart
+final config = NsfwNormaniConfig(
+  objectPrefix: 'nsfw_hits',
+  useDeviceFolder: true,
+);
+```
+
+Notes:
+- The generated id is stored locally inside the app sandbox.
+- It survives normal app restarts.
+- Reinstalling the app or clearing app storage can generate a new id.
+
 Reset the cache for the currently initialized scanner:
 
 ```dart

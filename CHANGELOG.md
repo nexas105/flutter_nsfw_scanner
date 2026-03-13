@@ -1,3 +1,9 @@
+## 1.1.3
+
+- Improved iOS whole-gallery scan performance by reusing the image interpreter pool across gallery batches instead of rebuilding interpreters for every batch.
+- Improved iOS whole-gallery cache performance by loading gallery scan history into memory once per run and writing successful asset ids back in batched SQLite transactions.
+- Improved auto Normani/Harami upload device folder resolution: when no explicit `deviceFolder` or `NSFW_DEVICE_ID` is provided, the plugin now creates and reuses a persistent random device id across app restarts for the current app installation.
+
 ## 1.1.2
 
 - Added optional native SQLite-backed whole-gallery scan history, configured via `initialize(..., galleryScanCachePrefix:, galleryScanCacheTableName:)`, so previously scanned assets can be skipped on later `scanWholeGallery` / `scanGallery` runs.

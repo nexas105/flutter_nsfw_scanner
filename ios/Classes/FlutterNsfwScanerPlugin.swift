@@ -1145,10 +1145,48 @@ private final class GalleryScanHistoryStore {
     }
   }
 
-  func markScanned(assetId: String) throws {
+  func loadAllScannedAssetIds() throws -> Set<String> {
     try lock.withLock {
       let db = try openDatabase()
       defer { sqlite3_close(db) }
+
+      let sql = "SELECT asset_id FROM \(tableName);"
+      var statement: OpaquePointer?
+      guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+        throw lastError(db)
+      }
+      defer { sqlite3_finalize(statement) }
+
+      var ids = Set<String>()
+      while sqlite3_step(statement) == SQLITE_ROW {
+        if let rawValue = sqlite3_column_text(statement, 0) {
+          ids.insert(String(cString: rawValue))
+        }
+      }
+      return ids
+    }
+  }
+
+  func markScanned(assetId: String) throws {
+    try markScanned(assetIds: [assetId])
+  }
+
+  func markScanned(assetIds: [String]) throws {
+    if assetIds.isEmpty {
+      return
+    }
+    try lock.withLock {
+      let db = try openDatabase()
+      defer { sqlite3_close(db) }
+
+      guard sqlite3_exec(db, "BEGIN IMMEDIATE TRANSACTION;", nil, nil, nil) == SQLITE_OK else {
+        throw lastError(db)
+      }
+      var shouldCommit = false
+      defer {
+        let sql = shouldCommit ? "COMMIT;" : "ROLLBACK;"
+        sqlite3_exec(db, sql, nil, nil, nil)
+      }
 
       let sql = """
         INSERT INTO \(tableName) (asset_id, scanned_at_epoch_ms)
@@ -1160,11 +1198,18 @@ private final class GalleryScanHistoryStore {
         throw lastError(db)
       }
       defer { sqlite3_finalize(statement) }
-      sqlite3_bind_text(statement, 1, assetId, -1, SQLITE_TRANSIENT)
-      sqlite3_bind_int64(statement, 2, Int64(Date().timeIntervalSince1970 * 1000))
-      guard sqlite3_step(statement) == SQLITE_DONE else {
-        throw lastError(db)
+
+      let scannedAt = Int64(Date().timeIntervalSince1970 * 1000)
+      for assetId in assetIds {
+        sqlite3_reset(statement)
+        sqlite3_clear_bindings(statement)
+        sqlite3_bind_text(statement, 1, assetId, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int64(statement, 2, scannedAt)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+          throw lastError(db)
+        }
       }
+      shouldCommit = true
     }
   }
 
@@ -2000,7 +2045,44 @@ private final class IOSNsfwScanner {
     let successCount: Int
     let errorCount: Int
     let flaggedCount: Int
+    let scannedAssetIds: [String]
     let deferredRetryItems: [GalleryAssetItem]
+  }
+
+  private final class GalleryScanContext {
+    let imageManager = PHCachingImageManager()
+    let workerCount: Int
+    private let poolLock = NSLock()
+    private var imageInterpreterPool: [Interpreter]
+
+    init(modelData: Data, numThreads: Int, workerCount: Int) throws {
+      self.workerCount = workerCount
+      self.imageInterpreterPool = []
+      imageInterpreterPool.reserveCapacity(workerCount)
+      for _ in 0..<workerCount {
+        let interpreter = try IOSNsfwScanner.createInterpreter(
+          modelData: modelData,
+          numThreads: numThreads
+        )
+        try interpreter.allocateTensors()
+        imageInterpreterPool.append(interpreter)
+      }
+    }
+
+    func borrowImageInterpreter() -> Interpreter? {
+      poolLock.lock()
+      defer { poolLock.unlock() }
+      guard !imageInterpreterPool.isEmpty else {
+        return nil
+      }
+      return imageInterpreterPool.removeLast()
+    }
+
+    func returnImageInterpreter(_ interpreter: Interpreter) {
+      poolLock.lock()
+      imageInterpreterPool.append(interpreter)
+      poolLock.unlock()
+    }
   }
 
   func scanGallery(
@@ -2070,6 +2152,11 @@ private final class IOSNsfwScanner {
     let cpuWorkers = max(1, ProcessInfo.processInfo.activeProcessorCount)
     let maxConcurrencySetting = (settings["maxConcurrency"] as? NSNumber)?.intValue ?? cpuWorkers
     let maxConcurrency = max(1, min(8, min(cpuWorkers, maxConcurrencySetting)))
+    let galleryContext = try GalleryScanContext(
+      modelData: modelData,
+      numThreads: numThreads,
+      workerCount: maxConcurrency
+    )
     if debugLogging {
       NSLog("[flutter_nsfw_scaner][gallery:\(scanId)] start includeImages=\(includeImages) includeVideos=\(includeVideos) batchSize=\(scanBatchSize) maxConcurrency=\(maxConcurrency)")
     }
@@ -2092,6 +2179,10 @@ private final class IOSNsfwScanner {
     fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
 
     let assets = PHAsset.fetchAssets(with: fetchOptions)
+    var cachedAssetIds = Set<String>()
+    if let galleryScanHistoryStore {
+      cachedAssetIds = (try? galleryScanHistoryStore.loadAllScannedAssetIds()) ?? []
+    }
     let totalDiscovered = assets.count
     let safeStartProduct = Int64(startPage) * Int64(pageSize)
     let startIndex = min(
@@ -2255,6 +2346,7 @@ private final class IOSNsfwScanner {
         continueOnError: continueOnError,
         preferThumbnailForImages: preferThumbnailForImages,
         thumbnailSize: thumbnailSize,
+        context: galleryContext,
         scanId: scanId,
         isCancelled: isCancelled,
         includeCleanResults: includeCleanResults,
@@ -2267,6 +2359,11 @@ private final class IOSNsfwScanner {
         )
       }
       applyOutcome(outcome)
+      if !outcome.scannedAssetIds.isEmpty {
+        for assetId in outcome.scannedAssetIds {
+          cachedAssetIds.insert(assetId)
+        }
+      }
     }
 
     var index = startIndex
@@ -2290,8 +2387,7 @@ private final class IOSNsfwScanner {
       }
 
       scannedAssets += 1
-      if let galleryScanHistoryStore,
-         (try? galleryScanHistoryStore.hasScanned(assetId: asset.localIdentifier)) == true {
+      if cachedAssetIds.contains(asset.localIdentifier) {
         skippedTotal += 1
         continue
       }
@@ -2372,6 +2468,7 @@ private final class IOSNsfwScanner {
             continueOnError: continueOnError,
             preferThumbnailForImages: preferThumbnailForImages,
             thumbnailSize: thumbnailSize,
+            context: galleryContext,
             scanId: "\(scanId)_retry_\(pass)",
             isCancelled: isCancelled,
             includeCleanResults: includeCleanResults,
@@ -2456,6 +2553,7 @@ private final class IOSNsfwScanner {
     continueOnError: Bool,
     preferThumbnailForImages: Bool,
     thumbnailSize: Int,
+    context: GalleryScanContext,
     scanId: String,
     isCancelled: @escaping () -> Bool,
     includeCleanResults: Bool,
@@ -2477,17 +2575,7 @@ private final class IOSNsfwScanner {
       throw ScannerError.cancelled("Scan cancelled")
     }
 
-    let workerCount = max(1, min(maxConcurrency, batch.count))
-    var imageInterpreterPool: [Interpreter] = []
-    imageInterpreterPool.reserveCapacity(workerCount)
-    for _ in 0..<workerCount {
-      let interpreter = try IOSNsfwScanner.createInterpreter(modelData: modelData, numThreads: numThreads)
-      try interpreter.allocateTensors()
-      imageInterpreterPool.append(interpreter)
-    }
-
-    let imageManager = PHCachingImageManager()
-    let poolLock = NSLock()
+    let workerCount = max(1, min(maxConcurrency, min(context.workerCount, batch.count)))
     let resultLock = NSLock()
     let fatalLock = NSLock()
     let retryLock = NSLock()
@@ -2495,6 +2583,7 @@ private final class IOSNsfwScanner {
     var firstFatalError: Error?
     var orderedResults = Array(repeating: [String: Any](), count: batch.count)
     var deferredRetryItems: [GalleryAssetItem] = []
+    var scannedAssetIds = [String]()
 
     let operationQueue = OperationQueue()
     operationQueue.qualityOfService = .userInitiated
@@ -2585,20 +2674,14 @@ private final class IOSNsfwScanner {
               }
             } else {
               var borrowedInterpreter: Interpreter?
-              poolLock.lock()
-              if !imageInterpreterPool.isEmpty {
-                borrowedInterpreter = imageInterpreterPool.removeLast()
-              }
-              poolLock.unlock()
+              borrowedInterpreter = context.borrowImageInterpreter()
 
               guard let interpreter = borrowedInterpreter else {
                 throw ScannerError.invalidArgument("No interpreter available")
               }
 
               defer {
-                poolLock.lock()
-                imageInterpreterPool.append(interpreter)
-                poolLock.unlock()
+                context.returnImageInterpreter(interpreter)
               }
 
               let identityPath = "ph://\(item.assetId)"
@@ -2608,7 +2691,7 @@ private final class IOSNsfwScanner {
                 do {
                   let image = try self.requestThumbnailImage(
                     asset: item.asset,
-                    manager: imageManager,
+                    manager: context.imageManager,
                     thumbnailSize: thumbnailSize
                   )
                   imageResult = try self.runSingleScan(
@@ -2640,7 +2723,7 @@ private final class IOSNsfwScanner {
                   // Fallback to thumbnail scanning if full asset materialization fails.
                   let image = try self.requestThumbnailImage(
                     asset: item.asset,
-                    manager: imageManager,
+                    manager: context.imageManager,
                     thumbnailSize: thumbnailSize
                   )
                   imageResult = try self.runSingleScan(
@@ -2662,10 +2745,9 @@ private final class IOSNsfwScanner {
               )
             }
 
-            try? self.galleryScanHistoryStore?.markScanned(assetId: item.assetId)
-
             resultLock.lock()
             orderedResults[index] = payload
+            scannedAssetIds.append(item.assetId)
             resultLock.unlock()
           } catch {
             if case ScannerError.cancelled = error {
@@ -2719,6 +2801,10 @@ private final class IOSNsfwScanner {
       throw ScannerError.cancelled("Scan cancelled")
     }
 
+    if !scannedAssetIds.isEmpty {
+      try? galleryScanHistoryStore?.markScanned(assetIds: scannedAssetIds)
+    }
+
     let nonEmptyResults = orderedResults.filter { !$0.isEmpty }
     let successCount = nonEmptyResults.filter { ($0["error"] == nil) || ($0["error"] is NSNull) }.count
     let errorCount = nonEmptyResults.count - successCount
@@ -2750,6 +2836,7 @@ private final class IOSNsfwScanner {
       successCount: successCount,
       errorCount: errorCount,
       flaggedCount: flaggedCount,
+      scannedAssetIds: scannedAssetIds,
       deferredRetryItems: deferredRetryItems
     )
   }

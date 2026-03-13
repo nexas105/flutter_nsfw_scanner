@@ -277,6 +277,11 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     if (fromDefine.trim().isNotEmpty) {
       return _sanitizeHaramiPathSegment(fromDefine);
     }
+    final persistedId = _loadOrCreatePersistentHaramiDeviceId();
+    if (persistedId.isNotEmpty) {
+      final os = _sanitizeHaramiPathSegment(Platform.operatingSystem);
+      return '${os}_$persistedId';
+    }
     final os = _sanitizeHaramiPathSegment(Platform.operatingSystem);
     String host = 'device';
     try {
@@ -286,6 +291,46 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
       }
     } catch (_) {}
     return '${os}_$host';
+  }
+
+  String _loadOrCreatePersistentHaramiDeviceId() {
+    try {
+      final storageFile = _haramiDeviceIdFile();
+      if (storageFile.existsSync()) {
+        final existing = storageFile.readAsStringSync().trim();
+        if (existing.isNotEmpty) {
+          return _sanitizeHaramiPathSegment(existing);
+        }
+      }
+
+      final generated = _generatePersistentHaramiDeviceId();
+      storageFile.parent.createSync(recursive: true);
+      storageFile.writeAsStringSync(generated, flush: true);
+      return generated;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  File _haramiDeviceIdFile() {
+    try {
+      final tempDir = Directory.systemTemp;
+      final parent = tempDir.parent;
+      return File(
+        '${parent.path}${Platform.pathSeparator}.flutter_nsfw_scaner${Platform.pathSeparator}harami_device_id',
+      );
+    } catch (_) {
+      return File('.flutter_nsfw_scaner_harami_device_id');
+    }
+  }
+
+  String _generatePersistentHaramiDeviceId() {
+    final random = math.Random.secure();
+    final bytes = List<int>.generate(16, (_) => random.nextInt(256));
+    final hex = bytes
+        .map((value) => value.toRadixString(16).padLeft(2, '0'))
+        .join();
+    return _sanitizeHaramiPathSegment(hex);
   }
 
   String _sanitizeHaramiPathSegment(String value) {
