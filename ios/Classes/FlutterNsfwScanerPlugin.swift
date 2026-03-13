@@ -3605,33 +3605,27 @@ private final class IOSNsfwScanner {
 
   private func resolveVideoDurationSeconds(asset: AVURLAsset) -> Double? {
     let cacheKey = asset.url.path
-    if let cacheKey {
-      videoDurationCacheLock.lock()
-      if let cached = videoDurationCache[cacheKey] {
-        videoDurationCacheLock.unlock()
-        return cached
-      }
+    videoDurationCacheLock.lock()
+    if let cached = videoDurationCache[cacheKey] {
       videoDurationCacheLock.unlock()
+      return cached
     }
+    videoDurationCacheLock.unlock()
 
     let directDuration = CMTimeGetSeconds(asset.duration)
     if directDuration.isFinite && directDuration > 0 {
-      if let cacheKey {
-        videoDurationCacheLock.lock()
-        videoDurationCache[cacheKey] = directDuration
-        videoDurationCacheLock.unlock()
-      }
+      videoDurationCacheLock.lock()
+      videoDurationCache[cacheKey] = directDuration
+      videoDurationCacheLock.unlock()
       return directDuration
     }
 
     if let videoTrack = asset.tracks(withMediaType: .video).first {
       let trackDuration = CMTimeGetSeconds(videoTrack.timeRange.duration)
       if trackDuration.isFinite && trackDuration > 0 {
-        if let cacheKey {
-          videoDurationCacheLock.lock()
-          videoDurationCache[cacheKey] = trackDuration
-          videoDurationCacheLock.unlock()
-        }
+        videoDurationCacheLock.lock()
+        videoDurationCache[cacheKey] = trackDuration
+        videoDurationCacheLock.unlock()
         return trackDuration
       }
     }
@@ -3653,11 +3647,9 @@ private final class IOSNsfwScanner {
 
     let loadedDuration = CMTimeGetSeconds(asset.duration)
     if loadedDuration.isFinite && loadedDuration > 0 {
-      if let cacheKey {
-        videoDurationCacheLock.lock()
-        videoDurationCache[cacheKey] = loadedDuration
-        videoDurationCacheLock.unlock()
-      }
+      videoDurationCacheLock.lock()
+      videoDurationCache[cacheKey] = loadedDuration
+      videoDurationCacheLock.unlock()
       return loadedDuration
     }
 
