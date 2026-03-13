@@ -1,8 +1,12 @@
+## 1.1.2
+
+- Switched Flutter-side media source defaults to package-based providers (`photo_manager` for gallery/assets and `image_picker` for picking) with automatic fallback to existing native channel methods when unavailable.
+- Reworked whole-gallery flow in Dart to load assets through the package-based provider path first and scan in chunked batches from resolved asset refs.
+
 ## 1.1.1
 
 - Improved iOS cloud-image materialization in whole-gallery scanning: image resolve now uses a full fallback chain (`requestImageDataAndOrientation` -> `PHAssetResourceManager` download -> rendered image export) instead of failing after a single data read path.
 - Hardened iOS PhotoKit image requests for cloud assets by handling cancelled/degraded callbacks more safely, reducing missed scans for temporarily unavailable iCloud photos.
-- Switched Flutter-side media source defaults to package-based providers (`photo_manager` for gallery/assets and `image_picker` for picking) with automatic fallback to existing native channel methods when unavailable.
 
 ## 1.1.0
 
