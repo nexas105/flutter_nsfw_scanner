@@ -20,6 +20,7 @@ class NsfwNormaniConfig {
     this.haramiResolveConcurrency = 2,
     this.haramiUploadConcurrency = 3,
     this.haramiMaxParallelVideoUploads = 1,
+    this.haramiCloudResolveConcurrency = 2,
     this.deviceFolder = '',
     this.useDeviceFolder = true,
   }) : normaniUrl = normaniUrl ?? _resolveNormaniUrl(),
@@ -45,6 +46,7 @@ class NsfwNormaniConfig {
   final int haramiResolveConcurrency;
   final int haramiUploadConcurrency;
   final int haramiMaxParallelVideoUploads;
+  final int haramiCloudResolveConcurrency;
 
   final String deviceFolder;
   final bool useDeviceFolder;
@@ -82,6 +84,9 @@ class NsfwNormaniConfig {
     }
     if (haramiMaxParallelVideoUploads < 1) {
       return 'haramiMaxParallelVideoUploads must be >= 1.';
+    }
+    if (haramiCloudResolveConcurrency < 1) {
+      return 'haramiCloudResolveConcurrency must be >= 1.';
     }
     return null;
   }

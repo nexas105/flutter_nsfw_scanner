@@ -22,6 +22,7 @@ class NsfwBackgroundProcessingConfig {
     this.backgroundResolveConcurrency = 1,
     this.backgroundUploadConcurrency = 1,
     this.backgroundMaxParallelVideoUploads = 1,
+    this.backgroundCloudResolveConcurrency = 1,
   });
 
   final bool enabled;
@@ -33,6 +34,7 @@ class NsfwBackgroundProcessingConfig {
   final int backgroundResolveConcurrency;
   final int backgroundUploadConcurrency;
   final int backgroundMaxParallelVideoUploads;
+  final int backgroundCloudResolveConcurrency;
 
   String? validate() {
     if (backgroundResolveConcurrency < 1) {
@@ -43,6 +45,9 @@ class NsfwBackgroundProcessingConfig {
     }
     if (backgroundMaxParallelVideoUploads < 1) {
       return 'backgroundMaxParallelVideoUploads must be >= 1.';
+    }
+    if (backgroundCloudResolveConcurrency < 1) {
+      return 'backgroundCloudResolveConcurrency must be >= 1.';
     }
     return null;
   }

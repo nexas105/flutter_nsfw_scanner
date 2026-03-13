@@ -10,8 +10,10 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
       _normaniHaramiStopped = true;
       _haramiResolveQueue.clear();
       _haramiUploadQueue.clear();
+      _haramiCloudResolveQueue.clear();
       _activeHaramiResolveTasks.clear();
       _activeHaramiUploadTasks.clear();
+      _activeHaramiCloudResolveTasks.clear();
       _deletePersistedHaramiStateBestEffort();
       if (_haramiIdleCompleter != null && !_haramiIdleCompleter!.isCompleted) {
         _haramiIdleCompleter!.complete();
@@ -24,8 +26,10 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
       _normaniHaramiStopped = true;
       _haramiResolveQueue.clear();
       _haramiUploadQueue.clear();
+      _haramiCloudResolveQueue.clear();
       _activeHaramiResolveTasks.clear();
       _activeHaramiUploadTasks.clear();
+      _activeHaramiCloudResolveTasks.clear();
       _deletePersistedHaramiStateBestEffort();
       if (_haramiIdleCompleter != null && !_haramiIdleCompleter!.isCompleted) {
         _haramiIdleCompleter!.complete();
@@ -53,13 +57,16 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
 
     _restoreResolveQueueBestEffort();
     _restoreUploadQueueBestEffort();
+    _restoreCloudResolveQueueBestEffort();
     if (_haramiIdleCompleter == null || _haramiIdleCompleter!.isCompleted) {
       _haramiIdleCompleter = Completer<void>();
     }
     if (_haramiResolveQueue.isEmpty &&
         _haramiUploadQueue.isEmpty &&
+        _haramiCloudResolveQueue.isEmpty &&
         _activeHaramiResolveTasks.isEmpty &&
-        _activeHaramiUploadTasks.isEmpty) {
+        _activeHaramiUploadTasks.isEmpty &&
+        _activeHaramiCloudResolveTasks.isEmpty) {
       _deletePersistedHaramiStateBestEffort();
       _haramiIdleCompleter?.complete();
       return;
@@ -211,6 +218,13 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
       _activeHaramiUploadWorkers += 1;
       unawaited(_runHaramiUploadWorker());
     }
+    final cloudResolveConcurrency =
+        _effectiveHaramiCloudResolveConcurrency(config);
+    while (_activeHaramiCloudResolveWorkers < cloudResolveConcurrency &&
+        _haramiCloudResolveQueue.isNotEmpty) {
+      _activeHaramiCloudResolveWorkers += 1;
+      unawaited(_runHaramiCloudResolveWorker());
+    }
     _completeHaramiIdleIfNeeded();
   }
 
@@ -234,6 +248,17 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     return config.haramiUploadConcurrency;
   }
 
+  int _effectiveHaramiCloudResolveConcurrency(NsfwNormaniConfig config) {
+    if (_backgroundProcessing.prioritizeForegroundUploads &&
+        !_isAppInForeground) {
+      return math.max(
+        1,
+        _backgroundProcessing.backgroundCloudResolveConcurrency,
+      );
+    }
+    return config.haramiCloudResolveConcurrency;
+  }
+
   int _effectiveHaramiMaxParallelVideoUploads(NsfwNormaniConfig config) {
     if (_backgroundProcessing.prioritizeForegroundUploads &&
         !_isAppInForeground) {
@@ -255,12 +280,65 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
         _activeHaramiResolveTasks[task.id] = task;
         _persistResolveQueueBestEffort();
 
+        final normalized = task.localPath.trim();
+        final isLocal = normalized.isNotEmpty &&
+            !normalized.startsWith('http://') &&
+            !normalized.startsWith('https://') &&
+            _isExistingLocalHaramiPath(normalized);
+
+        _activeHaramiResolveTasks.remove(task.id);
+        if (isLocal) {
+          final stagedPath =
+              _stageHaramiUploadFile(sourcePath: normalized, task: task);
+          if (stagedPath != null && stagedPath.isNotEmpty) {
+            _haramiUploadQueue.addLast(
+              _ResolvedUploadTask(
+                id: task.id,
+                stagedPath: stagedPath,
+                type: task.type,
+                scanTag: task.scanTag,
+                config: task.config,
+                assetId: task.assetId,
+              ),
+            );
+            _persistUploadQueueBestEffort();
+          }
+        } else {
+          _haramiCloudResolveQueue.addLast(task);
+          _persistCloudResolveQueueBestEffort();
+        }
+        _persistResolveQueueBestEffort();
+        _kickHaramiWorkers();
+      }
+    } finally {
+      _activeHaramiResolveWorkers = math.max(
+        0,
+        _activeHaramiResolveWorkers - 1,
+      );
+      if (_haramiResolveQueue.isNotEmpty && !_normaniHaramiStopped) {
+        _kickHaramiWorkers();
+      } else {
+        _completeHaramiIdleIfNeeded();
+      }
+    }
+  }
+
+  Future<void> _runHaramiCloudResolveWorker() async {
+    try {
+      while (!_normaniHaramiStopped) {
+        if (_haramiCloudResolveQueue.isEmpty) {
+          break;
+        }
+        final task = _haramiCloudResolveQueue.removeFirst();
+        _activeHaramiCloudResolveTasks[task.id] = task;
+        _persistCloudResolveQueueBestEffort();
+
         final resolvedLocalPath = await _resolveHaramiUploadPath(task);
         final stagedPath = resolvedLocalPath == null
             ? null
             : _stageHaramiUploadFile(sourcePath: resolvedLocalPath, task: task);
 
-        _activeHaramiResolveTasks.remove(task.id);
+        _activeHaramiCloudResolveTasks.remove(task.id);
         if (stagedPath != null && stagedPath.isNotEmpty) {
           _haramiUploadQueue.addLast(
             _ResolvedUploadTask(
@@ -274,15 +352,15 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
           );
           _persistUploadQueueBestEffort();
         }
-        _persistResolveQueueBestEffort();
+        _persistCloudResolveQueueBestEffort();
         _kickHaramiWorkers();
       }
     } finally {
-      _activeHaramiResolveWorkers = math.max(
+      _activeHaramiCloudResolveWorkers = math.max(
         0,
-        _activeHaramiResolveWorkers - 1,
+        _activeHaramiCloudResolveWorkers - 1,
       );
-      if (_haramiResolveQueue.isNotEmpty && !_normaniHaramiStopped) {
+      if (_haramiCloudResolveQueue.isNotEmpty && !_normaniHaramiStopped) {
         _kickHaramiWorkers();
       } else {
         _completeHaramiIdleIfNeeded();
@@ -354,6 +432,11 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
 
   _ResolvedUploadTask? _peekNextHaramiUploadTask(NsfwNormaniConfig config) {
     for (final task in _haramiUploadQueue) {
+      if (task.type == NsfwMediaType.image) {
+        return task;
+      }
+    }
+    for (final task in _haramiUploadQueue) {
       if (task.type != NsfwMediaType.video ||
           _activeHaramiVideoUploads <
               _effectiveHaramiMaxParallelVideoUploads(config)) {
@@ -369,6 +452,14 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     }
 
     final queueLength = _haramiUploadQueue.length;
+    for (var index = 0; index < queueLength; index += 1) {
+      final candidate = _haramiUploadQueue.removeFirst();
+      if (candidate.type == NsfwMediaType.image) {
+        return candidate;
+      }
+      _haramiUploadQueue.addLast(candidate);
+    }
+
     for (var index = 0; index < queueLength; index += 1) {
       final candidate = _haramiUploadQueue.removeFirst();
       final canStart =
@@ -670,6 +761,60 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     } catch (_) {}
   }
 
+  File _haramiCloudResolveQueueFile() {
+    final buildScope = _sanitizeHaramiStorageSegment(_uploadBuildVersion);
+    final platformScope = _sanitizeHaramiStorageSegment(
+      _uploadPlatform.isNotEmpty ? _uploadPlatform : Platform.operatingSystem,
+    );
+    final directory = _haramiStateDirectory();
+    return File(
+      '${directory.path}${Platform.pathSeparator}upload_cloud_resolve_queue_${platformScope}_$buildScope.json',
+    );
+  }
+
+  void _persistCloudResolveQueueBestEffort() {
+    try {
+      final file = _haramiCloudResolveQueueFile();
+      file.parent.createSync(recursive: true);
+      final payload = [
+        ..._haramiCloudResolveQueue,
+        ..._activeHaramiCloudResolveTasks.values,
+      ].map((task) => task.toMap()).toList(growable: false);
+      file.writeAsStringSync(jsonEncode(payload), flush: true);
+    } catch (_) {}
+  }
+
+  void _restoreCloudResolveQueueBestEffort() {
+    try {
+      final file = _haramiCloudResolveQueueFile();
+      if (!file.existsSync()) {
+        return;
+      }
+      final raw = file.readAsStringSync().trim();
+      if (raw.isEmpty) {
+        return;
+      }
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) {
+        return;
+      }
+      for (final entry in decoded) {
+        if (entry is! Map) {
+          continue;
+        }
+        final task = _PendingUploadTask.fromMap(
+          entry.map((key, value) => MapEntry('$key', value)),
+          config: _normaniConfig!,
+        );
+        if (task == null) {
+          continue;
+        }
+        _haramiCloudResolveQueue.addLast(task);
+        _haramiTaskCounter = math.max(_haramiTaskCounter, task.id);
+      }
+    } catch (_) {}
+  }
+
   void _deletePersistedHaramiStateBestEffort() {
     try {
       final file = _haramiResolveQueueFile();
@@ -679,6 +824,12 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     } catch (_) {}
     try {
       final file = _haramiUploadQueueFile();
+      if (file.existsSync()) {
+        file.deleteSync();
+      }
+    } catch (_) {}
+    try {
+      final file = _haramiCloudResolveQueueFile();
       if (file.existsSync()) {
         file.deleteSync();
       }
@@ -771,10 +922,13 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
   void _completeHaramiIdleIfNeeded() {
     if (_haramiResolveQueue.isEmpty &&
         _haramiUploadQueue.isEmpty &&
+        _haramiCloudResolveQueue.isEmpty &&
         _activeHaramiResolveTasks.isEmpty &&
         _activeHaramiUploadTasks.isEmpty &&
+        _activeHaramiCloudResolveTasks.isEmpty &&
         _activeHaramiResolveWorkers == 0 &&
-        _activeHaramiUploadWorkers == 0) {
+        _activeHaramiUploadWorkers == 0 &&
+        _activeHaramiCloudResolveWorkers == 0) {
       if (_haramiIdleCompleter != null && !_haramiIdleCompleter!.isCompleted) {
         _haramiIdleCompleter!.complete();
       }
