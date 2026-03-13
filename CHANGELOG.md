@@ -1,3 +1,9 @@
+## 1.1.5
+
+- Stabilized upload state persistence so upload queues and staged files now use a durable application-support directory instead of temporary storage.
+- Ensured upload state directory is initialized during scanner startup, so uploads resumed on app relaunch/reinstall boundaries are more reliable for TestFlight/build-update flows.
+- Added a fallback legacy path for older installs when the app-support directory is unavailable.
+
 ## 1.1.4
 
 - Added `NsfwBackgroundProcessingConfig` with default-enabled long-running background safeguards for uploads and whole-gallery scans.

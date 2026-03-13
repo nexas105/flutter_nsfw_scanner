@@ -4,6 +4,7 @@ import 'dart:collection';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:path_provider/path_provider.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -58,6 +59,7 @@ class FlutterNsfwScaner {
   Completer<void>? _haramiIdleCompleter;
   bool _limitedLibraryPickerAttempted = false;
   bool _backgroundJobsRestored = false;
+  Directory? _haramiStateDirectory;
   String _autoHaramiDeviceFolder = 'device';
   String _uploadBuildVersion = 'unknown';
   String _uploadPlatform = '';
@@ -142,6 +144,7 @@ class FlutterNsfwScaner {
       );
     }
     await _hydrateUploadRuntimeInfo();
+    await _hydrateHaramiStateDirectory();
     _effectiveGalleryScanCachePrefix = _buildScopedGalleryScanCacheKey(
       galleryScanCachePrefix,
       appendBuildVersion: true,
@@ -166,6 +169,25 @@ class FlutterNsfwScaner {
     await _restoreHaramiQueueIfNeeded();
     await _restoreBackgroundJobsIfNeeded();
     await _resumePendingBackgroundJobsIfNeeded();
+  }
+
+  Future<void> _hydrateHaramiStateDirectory() async {
+    if (_haramiStateDirectory != null) {
+      return;
+    }
+    try {
+      final applicationSupport = await getApplicationSupportDirectory();
+      final pluginStateDirectory = Directory(
+        '${applicationSupport.path}${Platform.pathSeparator}.flutter_nsfw_scaner',
+      );
+      await pluginStateDirectory.create(recursive: true);
+      _haramiStateDirectory = pluginStateDirectory;
+      debugPrint(
+        '[HARAMI] state dir initialized: ${pluginStateDirectory.path}',
+      );
+    } catch (_) {
+      _haramiStateDirectory = null;
+    }
   }
 
   Future<void> resetGalleryScanCache() {

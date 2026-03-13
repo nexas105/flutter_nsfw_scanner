@@ -176,6 +176,7 @@ Important platform note:
 - Android is better suited for prolonged background work.
 - On iOS, uploads can keep progressing more reliably than a full gallery scan.
 - If iOS suspends or the app is terminated, the plugin resumes persisted gallery jobs on the next app start; it does not claim unlimited post-termination execution.
+- Upload queue and staged files are persisted in a durable application-support directory so queued uploads are more likely to survive app upgrades/restarts during TestFlight release flows.
 
 ## Whole-gallery scan cache
 

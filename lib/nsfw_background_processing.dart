@@ -776,7 +776,7 @@ extension _NsfwBackgroundProcessingExt on FlutterNsfwScaner {
     final platformScope = _sanitizeHaramiStorageSegment(
       _uploadPlatform.isNotEmpty ? _uploadPlatform : Platform.operatingSystem,
     );
-    final directory = _haramiStateDirectory();
+    final directory = _haramiPersistStateDirectory();
     return File(
       '${directory.path}${Platform.pathSeparator}background_jobs_${platformScope}_$buildScope.json',
     );
