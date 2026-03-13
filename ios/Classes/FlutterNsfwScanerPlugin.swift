@@ -2568,6 +2568,7 @@ private final class IOSNsfwScanner {
         successCount: 0,
         errorCount: 0,
         flaggedCount: 0,
+        scannedAssetIds: [],
         deferredRetryItems: []
       )
     }
