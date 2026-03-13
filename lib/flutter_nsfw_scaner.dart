@@ -1721,6 +1721,7 @@ class FlutterNsfwScaner {
     Future<void> scanResolvedMediaChunk(
       List<NsfwMediaInput> mediaChunk, {
       required int baseProcessed,
+      Map<String, Queue<_ResolvedRefMeta>>? pathMetadata,
     }) async {
       if (mediaChunk.isEmpty) {
         return;
@@ -1738,13 +1739,25 @@ class FlutterNsfwScaner {
             error: chunkProgress.error,
           );
         },
-        onChunkResult: onChunkResult,
+        onChunkResult: null,
+      );
+      final enrichedItems = _attachResolvedRefMetadata(
+        result.items,
+        pathMetadata,
+      );
+      final enrichedChunk = NsfwMediaBatchResult(
+        items: enrichedItems,
+        processed: result.processed,
+        successCount: result.successCount,
+        errorCount: result.errorCount,
+        flaggedCount: result.flaggedCount,
       );
       processedTotal += result.processed;
       successTotal += result.successCount;
       errorTotal += result.errorCount;
       flaggedTotal += result.flaggedCount;
-      collectedItems.addAll(result.items);
+      collectedItems.addAll(enrichedItems);
+      onChunkResult?.call(enrichedChunk);
     }
 
     if (directMedia.isNotEmpty) {
@@ -1764,10 +1777,19 @@ class FlutterNsfwScaner {
           retryDelayMs: resolveRetryDelayMs,
         );
         final resolvedMedia = <NsfwMediaInput>[];
+        final pathMetadata = <String, Queue<_ResolvedRefMeta>>{};
         final resolveErrors = <NsfwMediaBatchItemResult>[];
         for (final outcome in resolvedOutcomes) {
           if (outcome.loaded != null) {
-            resolvedMedia.add(outcome.loaded!.toMediaInput());
+            final loaded = outcome.loaded!;
+            resolvedMedia.add(loaded.toMediaInput());
+            pathMetadata.putIfAbsent(loaded.path, () => Queue()).add(
+              _ResolvedRefMeta(
+                assetId: outcome.ref.id,
+                uri: 'ph://${outcome.ref.id}',
+                type: outcome.ref.type,
+              ),
+            );
           } else if (outcome.error != null) {
             resolveErrors.add(
               NsfwMediaBatchItemResult(
@@ -1800,6 +1822,7 @@ class FlutterNsfwScaner {
           await scanResolvedMediaChunk(
             resolvedMedia,
             baseProcessed: processedTotal,
+            pathMetadata: pathMetadata,
           );
         }
 
@@ -1815,6 +1838,53 @@ class FlutterNsfwScaner {
       errorCount: errorTotal,
       flaggedCount: flaggedTotal,
     );
+  }
+
+  List<NsfwMediaBatchItemResult> _attachResolvedRefMetadata(
+    List<NsfwMediaBatchItemResult> items,
+    Map<String, Queue<_ResolvedRefMeta>>? pathMetadata,
+  ) {
+    if (pathMetadata == null || pathMetadata.isEmpty || items.isEmpty) {
+      return items;
+    }
+    final enriched = <NsfwMediaBatchItemResult>[];
+    for (final item in items) {
+      final queue = pathMetadata[item.path];
+      _ResolvedRefMeta? meta;
+      if (queue != null && queue.isNotEmpty) {
+        if (queue.first.type == item.type) {
+          meta = queue.removeFirst();
+        } else {
+          for (final candidate in queue) {
+            if (candidate.type == item.type) {
+              meta = candidate;
+              break;
+            }
+          }
+          if (meta != null) {
+            queue.remove(meta);
+          } else {
+            meta = queue.removeFirst();
+          }
+        }
+      }
+      if (meta == null) {
+        enriched.add(item);
+        continue;
+      }
+      enriched.add(
+        NsfwMediaBatchItemResult(
+          path: item.path,
+          type: item.type,
+          assetId: item.assetId ?? meta.assetId,
+          uri: item.uri ?? meta.uri,
+          imageResult: item.imageResult,
+          videoResult: item.videoResult,
+          error: item.error,
+        ),
+      );
+    }
+    return enriched;
   }
 
   Future<NsfwMediaBatchResult> multiScan({
@@ -2372,6 +2442,18 @@ class _AssetResolveOutcome {
   final NsfwAssetRef ref;
   final NsfwLoadedAsset? loaded;
   final String? error;
+}
+
+class _ResolvedRefMeta {
+  const _ResolvedRefMeta({
+    required this.assetId,
+    required this.uri,
+    required this.type,
+  });
+
+  final String assetId;
+  final String uri;
+  final NsfwMediaType type;
 }
 
 NsfwMediaType _inferMediaType({required String path, String? mimeType}) {
