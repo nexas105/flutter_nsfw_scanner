@@ -1719,6 +1719,7 @@ private final class IOSNsfwScanner {
 
     var flaggedFrames = 0
     var maxNsfwScore = 0.0
+    var successfulFrames = 0
 
     for seconds in frameTimes {
       if isCancelled() {
@@ -1743,6 +1744,7 @@ private final class IOSNsfwScanner {
         if nsfwScore > maxNsfwScore {
           maxNsfwScore = nsfwScore
         }
+        successfulFrames += 1
 
         frameResults.append([
           "timestampMs": seconds * 1000,
@@ -1789,6 +1791,11 @@ private final class IOSNsfwScanner {
 
     if isCancelled() {
       throw ScannerError.cancelled("Scan cancelled")
+    }
+    if successfulFrames == 0 {
+      throw ScannerError.invalidArgument(
+        "Failed to extract decodable video frames for: \(videoPath)"
+      )
     }
 
     let sampledFrames = frameResults.count
@@ -2668,10 +2675,11 @@ private final class IOSNsfwScanner {
               let identityPath = "ph://\(item.assetId)"
               do {
                 let videoPath: String
-                if let resolvedVideoPath = try self.resolveVideoPath(for: item.asset) {
+                if let resolvedVideoPath = try self.resolveVideoPath(for: item.asset),
+                   self.canUseDirectVideoPath(resolvedVideoPath) {
                   videoPath = resolvedVideoPath
                 } else {
-                  // Fallback for cloud-backed videos where AVAsset URL is not immediately available.
+                  // Materialize to app-owned storage when direct PhotoData paths are not reliable.
                   videoPath = try self.resolveVideoAssetPath(asset: item.asset)
                 }
                 let videoResult = try self.scanVideo(
@@ -3497,6 +3505,22 @@ private final class IOSNsfwScanner {
       throw requestError
     }
     return nil
+  }
+
+  private func canUseDirectVideoPath(_ path: String) -> Bool {
+    let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalized.isEmpty else {
+      return false
+    }
+    guard FileManager.default.fileExists(atPath: normalized) else {
+      return false
+    }
+    let lower = normalized.lowercased()
+    if lower.hasPrefix("/var/mobile/media/photodata/") ||
+      lower.hasPrefix("/private/var/mobile/media/photodata/") {
+      return false
+    }
+    return true
   }
 
   private func exportVideoAssetToTempFile(
