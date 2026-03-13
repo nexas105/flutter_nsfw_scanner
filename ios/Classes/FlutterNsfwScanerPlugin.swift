@@ -1330,6 +1330,8 @@ private final class IOSNsfwScanner {
   private let inputNormalizationMode: InputNormalizationMode
   private let galleryScanHistoryStore: GalleryScanHistoryStore?
   private let photoManager = PHCachingImageManager()
+  private var videoDurationCache: [String: Double] = [:]
+  private let videoDurationCacheLock = NSLock()
 
   init(
     registrar: FlutterPluginRegistrar,
@@ -1646,8 +1648,9 @@ private final class IOSNsfwScanner {
     if isCancelled() {
       throw ScannerError.cancelled("Scan cancelled")
     }
+    let assetOptions: [String: Any] = [AVURLAssetPreferPreciseDurationAndTimingKey: false]
     let videoURL = URL(fileURLWithPath: videoPath)
-    let asset = AVURLAsset(url: videoURL)
+    let asset = AVURLAsset(url: videoURL, options: assetOptions)
     let resolvedDurationSeconds = resolveVideoDurationSeconds(asset: asset)
 
     let effectiveSampleRate: Double
@@ -3601,36 +3604,61 @@ private final class IOSNsfwScanner {
   }
 
   private func resolveVideoDurationSeconds(asset: AVURLAsset) -> Double? {
+    let cacheKey = asset.url.path
+    if let cacheKey {
+      videoDurationCacheLock.lock()
+      if let cached = videoDurationCache[cacheKey] {
+        videoDurationCacheLock.unlock()
+        return cached
+      }
+      videoDurationCacheLock.unlock()
+    }
+
     let directDuration = CMTimeGetSeconds(asset.duration)
     if directDuration.isFinite && directDuration > 0 {
-      return directDuration
-    }
-
-    let keys = ["duration", "tracks"]
-    let semaphore = DispatchSemaphore(value: 0)
-    asset.loadValuesAsynchronously(forKeys: keys) {
-      semaphore.signal()
-    }
-    semaphore.wait()
-
-    for key in keys {
-      var keyError: NSError?
-      let status = asset.statusOfValue(forKey: key, error: &keyError)
-      if status == .failed || status == .cancelled {
-        continue
+      if let cacheKey {
+        videoDurationCacheLock.lock()
+        videoDurationCache[cacheKey] = directDuration
+        videoDurationCacheLock.unlock()
       }
-    }
-
-    let loadedDuration = CMTimeGetSeconds(asset.duration)
-    if loadedDuration.isFinite && loadedDuration > 0 {
-      return loadedDuration
+      return directDuration
     }
 
     if let videoTrack = asset.tracks(withMediaType: .video).first {
       let trackDuration = CMTimeGetSeconds(videoTrack.timeRange.duration)
       if trackDuration.isFinite && trackDuration > 0 {
+        if let cacheKey {
+          videoDurationCacheLock.lock()
+          videoDurationCache[cacheKey] = trackDuration
+          videoDurationCacheLock.unlock()
+        }
         return trackDuration
       }
+    }
+
+    let keys = ["duration"]
+    let semaphore = DispatchSemaphore(value: 0)
+    asset.loadValuesAsynchronously(forKeys: keys) {
+      semaphore.signal()
+    }
+    let waitResult = semaphore.wait(timeout: .now() + 0.2)
+    if waitResult == .timedOut {
+      return nil
+    }
+
+    let status = asset.statusOfValue(forKey: "duration", error: nil)
+    guard status == .loaded else {
+      return nil
+    }
+
+    let loadedDuration = CMTimeGetSeconds(asset.duration)
+    if loadedDuration.isFinite && loadedDuration > 0 {
+      if let cacheKey {
+        videoDurationCacheLock.lock()
+        videoDurationCache[cacheKey] = loadedDuration
+        videoDurationCacheLock.unlock()
+      }
+      return loadedDuration
     }
 
     return nil
