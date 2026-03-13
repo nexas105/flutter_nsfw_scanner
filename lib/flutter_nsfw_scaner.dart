@@ -1662,73 +1662,158 @@ class FlutterNsfwScaner {
       effectiveVideoPaths = picked.videoPaths;
     }
 
-    final media = <NsfwMediaInput>[
+    final directMedia = <NsfwMediaInput>[
       ...effectiveImagePaths.map(NsfwMediaInput.image),
       ...effectiveVideoPaths.map(NsfwMediaInput.video),
     ];
-    final preflightErrors = <NsfwMediaBatchItemResult>[];
-    if (assetRefs.isNotEmpty) {
-      final resolvedOutcomes = await _resolveAssetRefs(
-        assetRefs,
-        resolveConcurrency: resolveConcurrency,
-        includeOriginFileFallback: includeOriginFileFallback,
-        retryPasses: resolveRetryPasses,
-        retryDelayMs: resolveRetryDelayMs,
-      );
-      media.addAll(
-        resolvedOutcomes
-            .where((item) => item.loaded != null)
-            .map((item) => item.loaded!.toMediaInput()),
-      );
-      preflightErrors.addAll(
-        resolvedOutcomes
-            .where((item) => item.error != null)
-            .map(
-              (item) => NsfwMediaBatchItemResult(
-                path: 'ph://${item.ref.id}',
-                type: item.ref.type,
-                assetId: item.ref.id,
-                uri: 'ph://${item.ref.id}',
-                error: item.error,
-              ),
-            ),
-      );
-    }
-    if (media.isEmpty) {
-      return NsfwMediaBatchResult(
-        items: preflightErrors,
-        processed: preflightErrors.length,
+    final totalTarget = directMedia.length + assetRefs.length;
+    if (totalTarget == 0) {
+      return const NsfwMediaBatchResult(
+        items: [],
+        processed: 0,
         successCount: 0,
-        errorCount: preflightErrors.length,
+        errorCount: 0,
         flaggedCount: 0,
       );
     }
 
     final effectiveChunkSize = _resolveAdaptiveChunkSize(
       requestedChunkSize: chunkSize,
-      totalItems: media.length,
+      totalItems: totalTarget,
       maxConcurrency: settings.maxConcurrency,
       minChunkSize: 8,
       maxChunkSize: 500,
     );
-
-    final scanned = await scanMediaInChunks(
-      media: media,
-      settings: settings,
-      chunkSize: effectiveChunkSize,
-      includeCleanResults: includeCleanResults,
-      onProgress: onProgress,
-      onChunkResult: onChunkResult,
+    final resolvedChunkSize = _resolveAdaptiveChunkSize(
+      requestedChunkSize: resolveConcurrency * 6,
+      totalItems: math.max(1, assetRefs.length),
+      maxConcurrency: resolveConcurrency,
+      minChunkSize: 1,
+      maxChunkSize: 120,
     );
-    if (preflightErrors.isEmpty) {
-      return scanned;
+
+    var processedTotal = 0;
+    var successTotal = 0;
+    var errorTotal = 0;
+    var flaggedTotal = 0;
+    final collectedItems = <NsfwMediaBatchItemResult>[];
+
+    void emitProgress({
+      required int processed,
+      String currentPath = '',
+      NsfwMediaType currentType = NsfwMediaType.image,
+      String? error,
+    }) {
+      onProgress?.call(
+        NsfwMediaBatchProgress(
+          processed: processed.clamp(0, totalTarget),
+          total: totalTarget,
+          percent: totalTarget <= 0
+              ? 0.0
+              : (processed.clamp(0, totalTarget) / totalTarget).clamp(0.0, 1.0),
+          currentPath: currentPath,
+          currentType: currentType,
+          error: error,
+        ),
+      );
     }
+
+    Future<void> scanResolvedMediaChunk(
+      List<NsfwMediaInput> mediaChunk, {
+      required int baseProcessed,
+    }) async {
+      if (mediaChunk.isEmpty) {
+        return;
+      }
+      final result = await scanMediaInChunks(
+        media: mediaChunk,
+        settings: settings,
+        chunkSize: effectiveChunkSize,
+        includeCleanResults: includeCleanResults,
+        onProgress: (chunkProgress) {
+          emitProgress(
+            processed: baseProcessed + chunkProgress.processed,
+            currentPath: chunkProgress.currentPath,
+            currentType: chunkProgress.currentType,
+            error: chunkProgress.error,
+          );
+        },
+        onChunkResult: onChunkResult,
+      );
+      processedTotal += result.processed;
+      successTotal += result.successCount;
+      errorTotal += result.errorCount;
+      flaggedTotal += result.flaggedCount;
+      collectedItems.addAll(result.items);
+    }
+
+    if (directMedia.isNotEmpty) {
+      await scanResolvedMediaChunk(directMedia, baseProcessed: processedTotal);
+    }
+
+    if (assetRefs.isNotEmpty) {
+      var cursor = 0;
+      while (cursor < assetRefs.length) {
+        final end = math.min(cursor + resolvedChunkSize, assetRefs.length);
+        final refsChunk = assetRefs.sublist(cursor, end);
+        final resolvedOutcomes = await _resolveAssetRefs(
+          refsChunk,
+          resolveConcurrency: resolveConcurrency,
+          includeOriginFileFallback: includeOriginFileFallback,
+          retryPasses: resolveRetryPasses,
+          retryDelayMs: resolveRetryDelayMs,
+        );
+        final resolvedMedia = <NsfwMediaInput>[];
+        final resolveErrors = <NsfwMediaBatchItemResult>[];
+        for (final outcome in resolvedOutcomes) {
+          if (outcome.loaded != null) {
+            resolvedMedia.add(outcome.loaded!.toMediaInput());
+          } else if (outcome.error != null) {
+            resolveErrors.add(
+              NsfwMediaBatchItemResult(
+                path: 'ph://${outcome.ref.id}',
+                type: outcome.ref.type,
+                assetId: outcome.ref.id,
+                uri: 'ph://${outcome.ref.id}',
+                error: outcome.error,
+              ),
+            );
+          }
+        }
+
+        if (resolveErrors.isNotEmpty) {
+          processedTotal += resolveErrors.length;
+          errorTotal += resolveErrors.length;
+          collectedItems.addAll(resolveErrors);
+          emitProgress(processed: processedTotal);
+          final resolveErrorChunk = NsfwMediaBatchResult(
+            items: resolveErrors,
+            processed: resolveErrors.length,
+            successCount: 0,
+            errorCount: resolveErrors.length,
+            flaggedCount: 0,
+          );
+          onChunkResult?.call(resolveErrorChunk);
+        }
+
+        if (resolvedMedia.isNotEmpty) {
+          await scanResolvedMediaChunk(
+            resolvedMedia,
+            baseProcessed: processedTotal,
+          );
+        }
+
+        cursor = end;
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+
     return NsfwMediaBatchResult(
-      items: [...preflightErrors, ...scanned.items],
-      processed: scanned.processed + preflightErrors.length,
-      successCount: scanned.successCount,
-      errorCount: scanned.errorCount + preflightErrors.length,
-      flaggedCount: scanned.flaggedCount,
+      items: collectedItems,
+      processed: processedTotal,
+      successCount: successTotal,
+      errorCount: errorTotal,
+      flaggedCount: flaggedTotal,
     );
   }
 

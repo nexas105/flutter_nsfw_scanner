@@ -627,7 +627,7 @@ void main() {
       result.items.where((item) => item.hasError).single.error,
       contains('Asset-Auflosung fehlgeschlagen'),
     );
-    expect(chunkProcessed, [1]);
+    expect(chunkProcessed, [1, 1]);
 
     await fakePlatform.close();
   });
