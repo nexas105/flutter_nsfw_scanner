@@ -5,10 +5,6 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     required bool enabled,
     NsfwNormaniConfig? normaniConfig,
   }) {
-    debugPrint(
-      '[HARAMI] configure: enabled=$enabled, '
-      'config=${normaniConfig != null}',
-    );
     if (!enabled) {
       _normaniConfig = null;
       _normaniHaramiStopped = true;
@@ -42,13 +38,6 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     }
     _normaniConfig = resolved;
     _normaniHaramiStopped = false;
-    debugPrint(
-      '[HARAMI] configured: url=${resolved.normalizedNormaniUrl}, '
-      'bucket=${resolved.normalizedBucket}, '
-      'anonKey=${resolved.anonKey.isNotEmpty ? "SET" : "EMPTY"}, '
-      'onlyNsfw=${resolved.haramiOnlyNsfw}, '
-      'images=${resolved.haramiImages}, videos=${resolved.haramiVideos}',
-    );
   }
 
   Future<void> _restoreHaramiQueueIfNeeded() async {
@@ -106,25 +95,11 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
   }) async {
     final config = _normaniConfig;
     if (!_isNormaniHaramiActive(config)) {
-      debugPrint(
-        '[HARAMI] skip single hit: normani not active '
-        '(config=${config != null}, stopped=$_normaniHaramiStopped, '
-        'enabled=${config?.enabled}, anonKey=${config?.anonKey.isNotEmpty})',
-      );
       return;
     }
     if (!_shouldHaramiByNormani(config: config!, type: type, isNsfw: isNsfw)) {
-      debugPrint(
-        '[HARAMI] skip single hit: filter rejected '
-        '(type=$type, isNsfw=$isNsfw, onlyNsfw=${config.haramiOnlyNsfw}, '
-        'images=${config.haramiImages}, videos=${config.haramiVideos})',
-      );
       return;
     }
-    debugPrint(
-      '[HARAMI] enqueue single hit: $localPath '
-      '(type=$type, isNsfw=$isNsfw, scanTag=$scanTag)',
-    );
     _enqueueHaramiTask(
       localPath: localPath,
       type: type,
@@ -140,14 +115,8 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
   }) async {
     final config = _normaniConfig;
     if (!_isNormaniHaramiActive(config) || items.isEmpty) {
-      debugPrint(
-        '[HARAMI] skip batch: normani not active or items empty '
-        '(items=${items.length}, config=${config != null}, '
-        'stopped=$_normaniHaramiStopped)',
-      );
       return;
     }
-    var enqueued = 0;
     for (final item in items) {
       if (!_shouldHaramiByNormani(
         config: config!,
@@ -169,12 +138,7 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
         config: config,
         assetId: item.assetId,
       );
-      enqueued += 1;
     }
-    debugPrint(
-      '[HARAMI] batch done: enqueued $enqueued of ${items.length} '
-      '(scanTag=$scanTag)',
-    );
   }
 
   bool _shouldHaramiByNormani({
@@ -217,17 +181,12 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
   }) {
     final normalized = localPath.trim();
     if (normalized.isEmpty) {
-      debugPrint('[HARAMI] enqueue skipped: empty path');
       return;
     }
     if (_haramiIdleCompleter == null || _haramiIdleCompleter!.isCompleted) {
       _haramiIdleCompleter = Completer<void>();
     }
     final taskId = ++_haramiTaskCounter;
-    debugPrint(
-      '[HARAMI] enqueue task #$taskId: '
-      '$normalized (type=$type, assetId=$assetId)',
-    );
 
     // Eagerly stage the file if it exists locally right now, before
     // the temp file can be cleaned up by the native layer.
@@ -251,10 +210,6 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
         task: task,
       );
       if (stagedPath != null && stagedPath.isNotEmpty) {
-        debugPrint(
-          '[HARAMI] enqueue #$taskId: '
-          'eagerly staged to $stagedPath, straight to upload queue',
-        );
         _haramiUploadQueue.addLast(
           _ResolvedUploadTask(
             id: taskId,
@@ -269,6 +224,19 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
         _kickHaramiWorkers();
         return;
       }
+      _haramiUploadQueue.addLast(
+        _ResolvedUploadTask(
+          id: taskId,
+          stagedPath: normalized,
+          type: type,
+          scanTag: scanTag,
+          config: config,
+          assetId: assetId,
+        ),
+      );
+      _persistUploadQueueBestEffort();
+      _kickHaramiWorkers();
+      return;
     }
 
     // File not local or staging failed — go through resolve queue
@@ -288,20 +256,8 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
 
   void _kickHaramiWorkers() {
     if (_normaniHaramiStopped || !_isNormaniHaramiActive(_normaniConfig)) {
-      debugPrint(
-        '[HARAMI] kick skipped: stopped=$_normaniHaramiStopped, '
-        'active=${_isNormaniHaramiActive(_normaniConfig)}',
-      );
       return;
     }
-    debugPrint(
-      '[HARAMI] kick: resolveQ=${_haramiResolveQueue.length}, '
-      'cloudQ=${_haramiCloudResolveQueue.length}, '
-      'uploadQ=${_haramiUploadQueue.length}, '
-      'resolveW=$_activeHaramiResolveWorkers, '
-      'cloudW=$_activeHaramiCloudResolveWorkers, '
-      'uploadW=$_activeHaramiUploadWorkers',
-    );
     final config = _normaniConfig!;
     final resolveConcurrency = _effectiveHaramiResolveConcurrency(config);
     final uploadConcurrency = _effectiveHaramiUploadConcurrency(config);
@@ -388,9 +344,6 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
 
         _activeHaramiResolveTasks.remove(task.id);
         if (isLocal) {
-          debugPrint(
-            '[HARAMI] resolve #${task.id}: LOCAL, staging $normalized',
-          );
           final stagedPath = _stageHaramiUploadFile(
             sourcePath: normalized,
             task: task,
@@ -407,12 +360,20 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
               ),
             );
             _persistUploadQueueBestEffort();
+          } else {
+            _haramiUploadQueue.addLast(
+              _ResolvedUploadTask(
+                id: task.id,
+                stagedPath: normalized,
+                type: task.type,
+                scanTag: task.scanTag,
+                config: task.config,
+                assetId: task.assetId,
+              ),
+            );
+            _persistUploadQueueBestEffort();
           }
         } else {
-          debugPrint(
-            '[HARAMI] resolve #${task.id}: CLOUD, '
-            'moving to cloud queue ($normalized)',
-          );
           _haramiCloudResolveQueue.addLast(task);
           _persistCloudResolveQueueBestEffort();
         }
@@ -442,18 +403,14 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
         _activeHaramiCloudResolveTasks[task.id] = task;
         _persistCloudResolveQueueBestEffort();
 
-        debugPrint(
-          '[HARAMI] cloud resolve #${task.id}: '
-          'loading asset ${task.localPath}',
-        );
         final resolvedLocalPath = await _resolveHaramiUploadPath(task);
-        debugPrint(
-          '[HARAMI] cloud resolve #${task.id}: '
-          'result=${resolvedLocalPath ?? "null"}',
-        );
-        final stagedPath = resolvedLocalPath == null
+        final uploadCandidatePath = resolvedLocalPath?.trim();
+        final stagedPath = uploadCandidatePath == null
             ? null
-            : _stageHaramiUploadFile(sourcePath: resolvedLocalPath, task: task);
+            : _stageHaramiUploadFile(
+                sourcePath: uploadCandidatePath,
+                task: task,
+              );
 
         _activeHaramiCloudResolveTasks.remove(task.id);
         if (stagedPath != null && stagedPath.isNotEmpty) {
@@ -468,6 +425,24 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
             ),
           );
           _persistUploadQueueBestEffort();
+        } else {
+          if (uploadCandidatePath != null &&
+              _isExistingLocalHaramiPath(uploadCandidatePath)) {
+            _haramiUploadQueue.addLast(
+              _ResolvedUploadTask(
+                id: task.id,
+                stagedPath: uploadCandidatePath,
+                type: task.type,
+                scanTag: task.scanTag,
+                config: task.config,
+                assetId: task.assetId,
+              ),
+            );
+            _persistUploadQueueBestEffort();
+          } else {
+            _haramiCloudResolveQueue.addLast(task);
+            _persistCloudResolveQueueBestEffort();
+          }
         }
         _persistCloudResolveQueueBestEffort();
         _kickHaramiWorkers();
@@ -494,10 +469,6 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
           break;
         }
         leasedTask = nextTask;
-        debugPrint(
-          '[HARAMI] upload #${leasedTask.id}: '
-          'starting ${leasedTask.type} ${leasedTask.stagedPath}',
-        );
         _activeHaramiUploadTasks[leasedTask.id] = leasedTask;
         if (leasedTask.type == NsfwMediaType.video) {
           _activeHaramiVideoUploads += 1;
@@ -520,10 +491,8 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
         }
 
         if (ok) {
-          debugPrint('[HARAMI] upload #${leasedTask.id}: SUCCESS');
           _deleteStagedHaramiFileBestEffort(leasedTask.stagedPath);
         } else {
-          debugPrint('[HARAMI] upload #${leasedTask.id}: FAILED, re-queuing');
           _haramiUploadQueue.addFirst(leasedTask);
           _persistUploadQueueBestEffort();
           leasedTask = null;
@@ -610,7 +579,6 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     final maxAttempts = math.max(1, config.haramiMaxTries);
     for (var attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        debugPrint('[HARAMI] retry attempt $attempt/$maxAttempts: $localPath');
         final ok = await _haramiSingleTry(
           localPath: localPath,
           type: type,
@@ -620,9 +588,8 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
         if (ok) {
           return true;
         }
-        debugPrint('[HARAMI] attempt $attempt: non-success response');
-      } catch (e) {
-        debugPrint('[HARAMI] attempt $attempt: exception $e');
+      } catch (error) {
+        continue;
       }
       if (attempt < maxAttempts) {
         final delayMs = _haramiRetryDelayMs(config: config, attempt: attempt);
@@ -668,13 +635,8 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
       );
       await request.addStream(File(localPath).openRead());
       final response = await request.close();
-      final responseBody = await utf8.decoder.bind(response).join();
+      await response.drain<void>();
       final success = response.statusCode >= 200 && response.statusCode < 300;
-      debugPrint(
-        '[HARAMI] HTTP ${response.statusCode} '
-        '${success ? "OK" : "FAIL"} -> $haramiUri '
-        '${success ? "" : responseBody}',
-      );
       return success;
     } finally {
       client.close(force: true);
