@@ -5,8 +5,6 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/services.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:photo_manager/photo_manager.dart';
 
 import 'flutter_nsfw_scaner_platform_interface.dart';
 import 'nsfw_asset.dart';
@@ -1628,7 +1626,10 @@ class FlutterNsfwScaner {
     final boundedMax = math.max(boundedMin, maxChunkSize);
     var resolved = requestedChunkSize.clamp(boundedMin, boundedMax);
     final safeConcurrency = maxConcurrency.clamp(1, 12);
-    final minByConcurrency = (safeConcurrency * 3).clamp(boundedMin, boundedMax);
+    final minByConcurrency = (safeConcurrency * 3).clamp(
+      boundedMin,
+      boundedMax,
+    );
     if (resolved < minByConcurrency) {
       resolved = minByConcurrency;
     }
