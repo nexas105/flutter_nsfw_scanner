@@ -1195,32 +1195,26 @@ class FlutterNsfwScaner {
       await _tryExpandLimitedAccessOnce();
     }
     try {
-      final refs = await loadMultipleAssets(
+      return await _scanWholeGalleryPaged(
+        settings: settings,
         includeImages: includeImages,
         includeVideos: includeVideos,
         pageSize: pageSize,
         startPage: startPage,
         maxPages: maxPages,
         maxItems: maxItems,
-        onProgress: onLoadProgress,
+        scanChunkSize: scanChunkSize,
+        includeCleanResults: includeCleanResults,
+        resolveConcurrency: resolveConcurrency,
+        includeOriginFileFallback: includeOriginFileFallback,
+        retryPasses: retryPasses,
+        retryDelayMs: retryDelayMs,
+        onLoadProgress: onLoadProgress,
+        onScanProgress: onScanProgress,
+        onChunkResult: onChunkResult,
       );
-      if (refs.isNotEmpty) {
-        return scanMultipleMedia(
-          pickIfEmpty: false,
-          assetRefs: refs,
-          settings: settings,
-          chunkSize: scanChunkSize,
-          includeCleanResults: includeCleanResults,
-          resolveConcurrency: resolveConcurrency,
-          includeOriginFileFallback: includeOriginFileFallback,
-          resolveRetryPasses: retryPasses,
-          resolveRetryDelayMs: retryDelayMs,
-          onProgress: onScanProgress,
-          onChunkResult: onChunkResult,
-        );
-      }
     } catch (_) {
-      // Fall back to native gallery scan when provider-based loading fails.
+      // Fall back to native gallery scan when paged provider-based scanning fails.
     }
 
     return _scanWholeGalleryViaNative(
@@ -1246,6 +1240,176 @@ class FlutterNsfwScaner {
       onLoadProgress: onLoadProgress,
       onScanProgress: onScanProgress,
       onChunkResult: onChunkResult,
+    );
+  }
+
+  Future<NsfwMediaBatchResult> _scanWholeGalleryPaged({
+    required NsfwMediaBatchSettings settings,
+    required bool includeImages,
+    required bool includeVideos,
+    required int pageSize,
+    required int startPage,
+    required int? maxPages,
+    required int? maxItems,
+    required int scanChunkSize,
+    required bool includeCleanResults,
+    required int resolveConcurrency,
+    required bool includeOriginFileFallback,
+    required int retryPasses,
+    required int retryDelayMs,
+    void Function(NsfwGalleryLoadProgress progress)? onLoadProgress,
+    void Function(NsfwMediaBatchProgress progress)? onScanProgress,
+    void Function(NsfwMediaBatchResult chunkResult)? onChunkResult,
+  }) async {
+    final safePageSize = pageSize.clamp(20, 2000);
+    final normalizedStartPage = startPage < 0 ? 0 : startPage;
+    final startOffset = normalizedStartPage * safePageSize;
+    final endPageExclusive = maxPages == null || maxPages <= 0
+        ? null
+        : normalizedStartPage + maxPages;
+    var currentPage = normalizedStartPage;
+    var nextStart = startOffset;
+    var discoveredAssets = 0;
+    var discoveredImages = 0;
+    var discoveredVideos = 0;
+    var processedTotal = 0;
+    var successTotal = 0;
+    var errorTotal = 0;
+    var flaggedTotal = 0;
+    var knownTotalTarget = 0;
+    var isTotalKnown = false;
+    var sawNonEmptyLibrary = false;
+    final aggregatedItems = <NsfwMediaBatchItemResult>[];
+
+    while (true) {
+      if (endPageExclusive != null && currentPage >= endPageExclusive) {
+        break;
+      }
+      final remainingItems = maxItems == null
+          ? null
+          : maxItems - discoveredAssets;
+      if (remainingItems != null && remainingItems <= 0) {
+        break;
+      }
+      final rangeSize = remainingItems == null
+          ? safePageSize
+          : math.min(safePageSize, math.max(1, remainingItems));
+      final page = await loadMultipleWithRange(
+        start: nextStart,
+        end: nextStart + rangeSize,
+        includeImages: includeImages,
+        includeVideos: includeVideos,
+      );
+      if (page.totalAssets > 0) {
+        sawNonEmptyLibrary = true;
+      }
+      if (!isTotalKnown) {
+        var computedTarget = math.max(0, page.totalAssets - startOffset);
+        if (maxPages != null && maxPages > 0) {
+          computedTarget = math.min(computedTarget, maxPages * safePageSize);
+        }
+        if (maxItems != null && maxItems > 0) {
+          computedTarget = math.min(computedTarget, maxItems);
+        }
+        knownTotalTarget = computedTarget;
+        isTotalKnown = true;
+      }
+
+      final refs = page.items;
+      for (final ref in refs) {
+        if (ref.isVideo) {
+          discoveredVideos += 1;
+        } else {
+          discoveredImages += 1;
+        }
+      }
+      discoveredAssets += refs.length;
+      onLoadProgress?.call(
+        NsfwGalleryLoadProgress(
+          page: currentPage,
+          scannedAssets: page.end,
+          imageCount: discoveredImages,
+          videoCount: discoveredVideos,
+          targetCount: isTotalKnown && knownTotalTarget > 0
+              ? knownTotalTarget
+              : maxItems,
+          isCompleted: false,
+        ),
+      );
+
+      if (refs.isNotEmpty) {
+        final baseProcessed = processedTotal;
+        final pageResult = await scanMultipleMedia(
+          pickIfEmpty: false,
+          assetRefs: refs,
+          settings: settings,
+          chunkSize: scanChunkSize,
+          includeCleanResults: includeCleanResults,
+          resolveConcurrency: resolveConcurrency,
+          includeOriginFileFallback: includeOriginFileFallback,
+          resolveRetryPasses: retryPasses,
+          resolveRetryDelayMs: retryDelayMs,
+          onProgress: (progress) {
+            final processed = baseProcessed + progress.processed;
+            final total = isTotalKnown && knownTotalTarget > 0
+                ? knownTotalTarget
+                : math.max(processed, baseProcessed + progress.total);
+            onScanProgress?.call(
+              NsfwMediaBatchProgress(
+                processed: processed,
+                total: total,
+                percent: total <= 0 ? 0.0 : (processed / total).clamp(0.0, 1.0),
+                currentPath: progress.currentPath,
+                currentType: progress.currentType,
+                error: progress.error,
+              ),
+            );
+          },
+          onChunkResult: onChunkResult,
+        );
+        processedTotal += pageResult.processed;
+        successTotal += pageResult.successCount;
+        errorTotal += pageResult.errorCount;
+        flaggedTotal += pageResult.flaggedCount;
+        aggregatedItems.addAll(pageResult.items);
+      }
+
+      if (!page.hasMore) {
+        break;
+      }
+      if (page.end <= nextStart) {
+        break;
+      }
+      nextStart = page.end;
+      currentPage += 1;
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    onLoadProgress?.call(
+      NsfwGalleryLoadProgress(
+        page: currentPage,
+        scannedAssets: math.max(startOffset, nextStart),
+        imageCount: discoveredImages,
+        videoCount: discoveredVideos,
+        targetCount: isTotalKnown && knownTotalTarget > 0
+            ? knownTotalTarget
+            : maxItems,
+        isCompleted: true,
+      ),
+    );
+
+    if (sawNonEmptyLibrary && processedTotal == 0 && discoveredAssets == 0) {
+      throw StateError(
+        'Paged gallery discovery returned no assets although library is not empty.',
+      );
+    }
+
+    return NsfwMediaBatchResult(
+      items: aggregatedItems,
+      processed: processedTotal,
+      successCount: successTotal,
+      errorCount: errorTotal,
+      flaggedCount: flaggedTotal,
     );
   }
 
