@@ -945,11 +945,22 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
   }
 
   Future<String?> _resolveHaramiUploadPath(_PendingUploadTask task) async {
+    final isVideoTask = task.type == NsfwMediaType.video;
     final normalized = task.localPath.trim();
     if (normalized.isEmpty) {
+      if (isVideoTask) {
+        debugPrint(
+          '[HARAMI][video-resolve] skipped: empty localPath (task=${task.id}, assetId=${task.assetId ?? '-'})',
+        );
+      }
       return null;
     }
     if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+      if (isVideoTask) {
+        debugPrint(
+          '[HARAMI][video-resolve] skipped: remote URL not supported (task=${task.id}, path=$normalized)',
+        );
+      }
       return null;
     }
     if (_isExistingLocalHaramiPath(normalized)) {
@@ -961,6 +972,11 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
         ? task.assetId!.trim()
         : fallbackAssetId;
     if (assetId == null || assetId.isEmpty) {
+      if (isVideoTask) {
+        debugPrint(
+          '[HARAMI][video-resolve] failed: missing assetId (task=${task.id}, localPath=$normalized)',
+        );
+      }
       return null;
     }
 
@@ -973,10 +989,20 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
       );
       final path = loaded?.path.trim() ?? '';
       if (path.isEmpty || path.startsWith('ph://')) {
+        if (isVideoTask) {
+          debugPrint(
+            '[HARAMI][video-resolve] failed: unresolved path (task=${task.id}, assetId=$assetId, resolved=$path)',
+          );
+        }
         return null;
       }
       return path;
-    } catch (_) {
+    } catch (error) {
+      if (isVideoTask) {
+        debugPrint(
+          '[HARAMI][video-resolve] exception (task=${task.id}, assetId=$assetId): $error',
+        );
+      }
       return null;
     }
   }
