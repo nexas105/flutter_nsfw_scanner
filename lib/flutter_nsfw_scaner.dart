@@ -47,6 +47,11 @@ class FlutterNsfwScaner {
   int _activeHaramiResolveWorkers = 0;
   int _activeHaramiUploadWorkers = 0;
   int _activeHaramiVideoUploads = 0;
+  final Queue<_PendingUploadTask> _haramiCloudResolveQueue =
+      Queue<_PendingUploadTask>();
+  final Map<int, _PendingUploadTask> _activeHaramiCloudResolveTasks =
+      <int, _PendingUploadTask>{};
+  int _activeHaramiCloudResolveWorkers = 0;
   int _haramiTaskCounter = 0;
   bool _normaniHaramiStopped = false;
   bool _restoredHaramiQueue = false;
