@@ -304,20 +304,45 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
       return null;
     }
-    if (!normalized.startsWith('ph://')) {
-      return normalized;
-    }
-
     final fallbackAssetId = normalized.startsWith('ph://')
         ? normalized.substring('ph://'.length)
         : null;
     final assetId = (task.assetId?.trim().isNotEmpty == true)
         ? task.assetId!.trim()
         : fallbackAssetId;
+
+    if (!normalized.startsWith('ph://')) {
+      final existing = File(normalized);
+      if (await existing.exists()) {
+        return normalized;
+      }
+      // File may have been a temporary export (especially videos). Try resolving again via asset id.
+      if (assetId == null || assetId.isEmpty) {
+        return null;
+      }
+      try {
+        final loaded = await loadAsset(
+          assetId: assetId,
+          allowImages: task.type == NsfwMediaType.image,
+          allowVideos: task.type == NsfwMediaType.video,
+          includeOriginFileFallback: true,
+        );
+        final path = loaded?.path.trim() ?? '';
+        if (path.isEmpty || path.startsWith('ph://')) {
+          return null;
+        }
+        if (!await File(path).exists()) {
+          return null;
+        }
+        return path;
+      } catch (_) {
+        return null;
+      }
+    }
+
     if (assetId == null || assetId.isEmpty) {
       return null;
     }
-
     try {
       final loaded = await loadAsset(
         assetId: assetId,
@@ -327,6 +352,9 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
       );
       final path = loaded?.path.trim() ?? '';
       if (path.isEmpty || path.startsWith('ph://')) {
+        return null;
+      }
+      if (!await File(path).exists()) {
         return null;
       }
       return path;
