@@ -16,6 +16,7 @@ class MockFlutterNsfwScanerPlatform
   double? lastScanImageThreshold;
   double? lastScanBatchThreshold;
   double? lastScanVideoThreshold;
+  bool returnEmptyPathForVideoBatch = false;
 
   @override
   Stream<Map<String, dynamic>> get progressStream => _progressController.stream;
@@ -261,7 +262,7 @@ class MockFlutterNsfwScanerPlatform
           final type = '${item['type']}';
           if (type == 'video') {
             return {
-              'path': item['path'],
+              'path': returnEmptyPathForVideoBatch ? null : item['path'],
               'type': 'video',
               'imageResult': null,
               'videoResult': {
@@ -272,6 +273,7 @@ class MockFlutterNsfwScanerPlatform
                 'flaggedRatio': 0.2,
                 'maxNsfwScore': 0.9,
                 'isNsfw': true,
+                'requiredNsfwFrames': 3,
                 'frames': const [],
               },
               'error': null,
@@ -745,4 +747,54 @@ void main() {
 
     await fakePlatform.close();
   });
+
+  test('scanMedia preserves asset references for video assets', () async {
+    final fakePlatform = MockFlutterNsfwScanerPlatform();
+    FlutterNsfwScanerPlatform.instance = fakePlatform;
+    final plugin = FlutterNsfwScaner();
+
+    final result = await plugin.scanMedia(
+      assetRef: const NsfwAssetRef(
+        id: 'video:2',
+        type: NsfwMediaType.video,
+        width: 1920,
+        height: 1080,
+        durationSeconds: 12,
+        createDateSecond: 2,
+        modifiedDateSecond: 2,
+      ),
+    );
+
+    expect(result.type, NsfwMediaType.video);
+    expect(result.path, 'video:2');
+    expect(result.assetId, 'video:2');
+    expect(result.uri, 'video:2');
+    expect(result.videoResult, isNotNull);
+    expect(result.videoResult!.videoPath, '/tmp/resolved_video_2');
+    expect(result.videoResult!.requiredNsfwFrames, 1);
+
+    await fakePlatform.close();
+  });
+
+  test(
+    'scanMediaBatch falls back to videoResult.videoPath when path is empty',
+    () async {
+      final fakePlatform = MockFlutterNsfwScanerPlatform()
+        ..returnEmptyPathForVideoBatch = true;
+      FlutterNsfwScanerPlatform.instance = fakePlatform;
+      final plugin = FlutterNsfwScaner();
+
+      final result = await plugin.scanMediaBatch(
+        media: const [NsfwMediaInput.video('/tmp/b.mp4')],
+      );
+
+      expect(result.items, hasLength(1));
+      expect(result.items.first.type, NsfwMediaType.video);
+      expect(result.items.first.path, '/tmp/b.mp4');
+      expect(result.items.first.videoResult, isNotNull);
+      expect(result.items.first.videoResult!.requiredNsfwFrames, 3);
+
+      await fakePlatform.close();
+    },
+  );
 }

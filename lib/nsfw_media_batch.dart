@@ -108,6 +108,16 @@ class NsfwMediaBatchItemResult {
     }
     return false;
   }
+
+  double get score {
+    if (imageResult != null) {
+      return imageResult!.nsfwScore;
+    }
+    if (videoResult != null) {
+      return videoResult!.maxNsfwScore;
+    }
+    return 0.0;
+  }
 }
 
 class NsfwMediaBatchResult {

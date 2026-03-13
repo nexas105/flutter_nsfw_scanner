@@ -39,6 +39,7 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     required NsfwMediaType type,
     required bool isNsfw,
     required String scanTag,
+    String? assetId,
   }) async {
     final config = _normaniConfig;
     if (!_isNormaniHaramiActive(config)) {
@@ -52,6 +53,7 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
       type: type,
       scanTag: scanTag,
       config: config,
+      assetId: assetId,
     );
   }
 
@@ -349,13 +351,11 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
       return null;
     }
-    if (!normalized.startsWith('ph://')) {
+    if (_isExistingLocalHaramiPath(normalized)) {
       return normalized;
     }
 
-    final fallbackAssetId = normalized.startsWith('ph://')
-        ? normalized.substring('ph://'.length)
-        : null;
+    final fallbackAssetId = _extractFallbackAssetId(normalized);
     final assetId = (task.assetId?.trim().isNotEmpty == true)
         ? task.assetId!.trim()
         : fallbackAssetId;
@@ -378,6 +378,31 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     } catch (_) {
       return null;
     }
+  }
+
+  bool _isExistingLocalHaramiPath(String path) {
+    if (path.startsWith('/')) {
+      return File(path).existsSync();
+    }
+    if (path.toLowerCase().startsWith('file://')) {
+      final uri = Uri.tryParse(path);
+      final candidate = uri?.toFilePath();
+      if (candidate == null || candidate.isEmpty) {
+        return false;
+      }
+      return File(candidate).existsSync();
+    }
+    return false;
+  }
+
+  String? _extractFallbackAssetId(String path) {
+    if (path.startsWith('ph://')) {
+      return path.substring('ph://'.length);
+    }
+    if (path.startsWith('image:') || path.startsWith('video:')) {
+      return path;
+    }
+    return null;
   }
 }
 

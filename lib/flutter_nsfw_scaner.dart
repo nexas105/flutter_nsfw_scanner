@@ -1248,10 +1248,13 @@ class FlutterNsfwScaner {
     if (path == null || path.isEmpty) {
       throw const FormatException('Unable to resolve media path.');
     }
+    final resolvedLocalPath = path;
+    final assetUri = hasRef ? _assetRefPath(assetRef!) : null;
+    final exposedPath = assetUri ?? resolvedLocalPath;
 
     if (type == NsfwMediaType.video) {
       final videoResult = await scanVideo(
-        videoPath: path,
+        videoPath: resolvedLocalPath,
         threshold: settings.videoThreshold,
         sampleRateFps: settings.videoSampleRateFps,
         maxFrames: settings.videoMaxFrames,
@@ -1273,22 +1276,42 @@ class FlutterNsfwScaner {
             settings.videoEarlyStopVeryLongBonusFrames,
         onProgress: onProgress,
       );
-      return NsfwMediaBatchItemResult(
-        path: path,
+      final item = NsfwMediaBatchItemResult(
+        path: exposedPath,
         type: NsfwMediaType.video,
+        assetId: assetRef?.id,
+        uri: assetUri,
         videoResult: videoResult,
       );
+      await _maybeAutoHaramiSingleHit(
+        localPath: exposedPath,
+        type: NsfwMediaType.video,
+        isNsfw: videoResult.isNsfw,
+        scanTag: 'scan_media',
+        assetId: assetRef?.id,
+      );
+      return item;
     }
 
     final imageResult = await scanImage(
-      imagePath: path,
+      imagePath: resolvedLocalPath,
       threshold: settings.imageThreshold,
     );
-    return NsfwMediaBatchItemResult(
-      path: path,
+    final item = NsfwMediaBatchItemResult(
+      path: exposedPath,
       type: NsfwMediaType.image,
+      assetId: assetRef?.id,
+      uri: assetUri,
       imageResult: imageResult,
     );
+    await _maybeAutoHaramiSingleHit(
+      localPath: exposedPath,
+      type: NsfwMediaType.image,
+      isNsfw: imageResult.isNsfw,
+      scanTag: 'scan_media',
+      assetId: assetRef?.id,
+    );
+    return item;
   }
 
   Future<NsfwMediaBatchItemResult> scanMediaFromUrl({
@@ -1759,23 +1782,26 @@ NsfwMediaBatchResult _parseMediaBatchResult(Map<String, dynamic> payload) {
           : NsfwMediaType.image;
       final rawImageResult = itemMap['imageResult'];
       final rawVideoResult = itemMap['videoResult'];
+      final parsedImageResult = rawImageResult is Map
+          ? NsfwScanResult.fromMap(
+              rawImageResult.map((key, value) => MapEntry('$key', value)),
+            )
+          : null;
+      final parsedVideoResult = rawVideoResult is Map
+          ? NsfwVideoScanResult.fromMap(
+              rawVideoResult.map((key, value) => MapEntry('$key', value)),
+            )
+          : null;
+      final resolvedPath =
+          '${itemMap['path'] ?? parsedVideoResult?.videoPath ?? parsedImageResult?.imagePath ?? itemMap['uri'] ?? itemMap['assetId'] ?? ''}';
       items.add(
         NsfwMediaBatchItemResult(
-          path:
-              '${itemMap['path'] ?? itemMap['uri'] ?? itemMap['assetId'] ?? ''}',
+          path: resolvedPath,
           type: type,
           assetId: _toNullableString(itemMap['assetId']),
           uri: _toNullableString(itemMap['uri']),
-          imageResult: rawImageResult is Map
-              ? NsfwScanResult.fromMap(
-                  rawImageResult.map((key, value) => MapEntry('$key', value)),
-                )
-              : null,
-          videoResult: rawVideoResult is Map
-              ? NsfwVideoScanResult.fromMap(
-                  rawVideoResult.map((key, value) => MapEntry('$key', value)),
-                )
-              : null,
+          imageResult: parsedImageResult,
+          videoResult: parsedVideoResult,
           error: _toNullableString(itemMap['error']),
         ),
       );

@@ -1311,6 +1311,7 @@ private final class IOSNsfwScanner {
   private let outputElementCount: Int
   private let inputNormalizationMode: InputNormalizationMode
   private let galleryScanHistoryStore: GalleryScanHistoryStore?
+  private let photoManager = PHCachingImageManager()
 
   init(
     registrar: FlutterPluginRegistrar,
@@ -1401,10 +1402,9 @@ private final class IOSNsfwScanner {
     }
 
     let asset = try resolvePhotoAsset(from: normalizedRef)
-    let manager = PHCachingImageManager()
     let cgImage = try requestThumbnailImage(
       asset: asset,
-      manager: manager,
+      manager: photoManager,
       thumbnailSize: max(safeWidth, safeHeight)
     )
     let resized = try IOSNsfwScanner.resizeImage(cgImage, width: safeWidth, height: safeHeight)
@@ -1425,27 +1425,35 @@ private final class IOSNsfwScanner {
     let asset = try resolvePhotoAsset(from: normalizedRef)
     let cacheDirectory = try ensureCacheDirectory(named: "asset_cache")
     let cacheKey = IOSNsfwScanner.stableHash(normalizedRef)
-    let outputURL = cacheDirectory.appendingPathComponent("asset_\(cacheKey).img")
+    let cachedCandidates = [
+      "jpg",
+      "jpeg",
+      "png",
+      "gif",
+      "heic",
+      "heif",
+      "webp",
+      "bmp",
+    ].map { cacheDirectory.appendingPathComponent("asset_\(cacheKey).\($0)") }
+    if let existing = cachedCandidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
+      return existing.path
+    }
+
+    let resolvedPath = try resolveImageAssetPath(asset: asset)
+    let resolvedURL = URL(fileURLWithPath: resolvedPath)
+    let ext = preferredImageExtension(for: asset, fallbackPathExtension: resolvedURL.pathExtension)
+    let outputURL = cacheDirectory.appendingPathComponent("asset_\(cacheKey).\(ext)")
     if FileManager.default.fileExists(atPath: outputURL.path) {
       return outputURL.path
     }
-
-    if let imageData = try requestImageData(for: asset) {
-      try imageData.write(to: outputURL, options: .atomic)
+    if resolvedURL.path != outputURL.path {
+      if FileManager.default.fileExists(atPath: outputURL.path) {
+        try FileManager.default.removeItem(at: outputURL)
+      }
+      try FileManager.default.copyItem(at: resolvedURL, to: outputURL)
       return outputURL.path
     }
-
-    let manager = PHCachingImageManager()
-    let image = try requestUIImage(
-      asset: asset,
-      manager: manager,
-      targetSize: CGSize(width: asset.pixelWidth, height: asset.pixelHeight)
-    )
-    guard let jpegData = image.jpegData(compressionQuality: 0.97) else {
-      throw ScannerError.invalidArgument("Unable to encode image data for asset \(asset.localIdentifier)")
-    }
-    try jpegData.write(to: outputURL, options: .atomic)
-    return outputURL.path
+    return resolvedPath
   }
 
   func scanBatch(
@@ -2590,6 +2598,25 @@ private final class IOSNsfwScanner {
     operationQueue.qualityOfService = .userInitiated
     operationQueue.maxConcurrentOperationCount = workerCount
     let group = DispatchGroup()
+    let imageAssets = batch.filter { $0.type == "image" }.map(\.asset)
+    if !imageAssets.isEmpty {
+      context.imageManager.startCachingImages(
+        for: imageAssets,
+        targetSize: CGSize(width: thumbnailSize, height: thumbnailSize),
+        contentMode: .aspectFill,
+        options: nil
+      )
+    }
+    defer {
+      if !imageAssets.isEmpty {
+        context.imageManager.stopCachingImages(
+          for: imageAssets,
+          targetSize: CGSize(width: thumbnailSize, height: thumbnailSize),
+          contentMode: .aspectFill,
+          options: nil
+        )
+      }
+    }
 
     for (index, item) in batch.enumerated() {
       if isCancelled() {
@@ -2617,7 +2644,7 @@ private final class IOSNsfwScanner {
               let identityPath = "ph://\(item.assetId)"
               do {
                 let videoPath: String
-                if let resolvedVideoPath = self.resolveVideoPath(for: item.asset) {
+                if let resolvedVideoPath = try self.resolveVideoPath(for: item.asset) {
                   videoPath = resolvedVideoPath
                 } else {
                   // Fallback for cloud-backed videos where AVAsset URL is not immediately available.
@@ -2917,7 +2944,7 @@ private final class IOSNsfwScanner {
       return localPath
     }
     let asset = try resolvePhotoAsset(from: assetRefOrPath)
-    if let resolvedPath = resolveVideoPath(for: asset) {
+    if let resolvedPath = try resolveVideoPath(for: asset) {
       return resolvedPath
     }
     return try resolveVideoAssetPath(asset: asset)
@@ -2939,7 +2966,7 @@ private final class IOSNsfwScanner {
     let asset = try resolvePhotoAsset(from: assetRefOrPath)
     let thumbnail = try requestThumbnailImage(
       asset: asset,
-      manager: PHCachingImageManager(),
+      manager: photoManager,
       thumbnailSize: max(inputWidth, inputHeight)
     )
     return try runSingleScan(
@@ -3210,12 +3237,13 @@ private final class IOSNsfwScanner {
     guard let data = try requestImageData(for: asset), !data.isEmpty else {
       return nil
     }
-    return try writeAssetDataToTemp(data: data, preferredExtension: "jpg")
+    let ext = preferredImageExtension(for: asset, fallbackPathExtension: "jpg")
+    return try writeAssetDataToTemp(data: data, preferredExtension: ext)
   }
 
   private func resolveImageAssetPathUsingResourceDownload(asset: PHAsset) throws -> String? {
     let resources = PHAssetResource.assetResources(for: asset)
-    guard let resource = resources.first(where: { $0.type == .photo || $0.type == .fullSizePhoto }) ?? resources.first else {
+    guard let resource = preferredImageResource(for: asset, resources: resources) ?? resources.first else {
       return nil
     }
 
@@ -3240,10 +3268,14 @@ private final class IOSNsfwScanner {
       return nil
     }
 
-    let ext = (resource.originalFilename as NSString).pathExtension
+    let ext = preferredImageExtension(
+      for: asset,
+      resourceFilename: resource.originalFilename,
+      fallbackPathExtension: (resource.originalFilename as NSString).pathExtension
+    )
     return try writeAssetDataToTemp(
       data: collectedData,
-      preferredExtension: ext.isEmpty ? "jpg" : ext
+      preferredExtension: ext
     )
   }
 
@@ -3295,6 +3327,32 @@ private final class IOSNsfwScanner {
     return try writeAssetDataToTemp(data: data, preferredExtension: "jpg")
   }
 
+  private func preferredImageResource(
+    for asset: PHAsset,
+    resources: [PHAssetResource]
+  ) -> PHAssetResource? {
+    if asset.mediaSubtypes.contains(.photoLive) {
+      return resources.first(where: { $0.type == .photo || $0.type == .fullSizePhoto })
+    }
+    return resources.first(where: { $0.type == .photo || $0.type == .fullSizePhoto })
+  }
+
+  private func preferredImageExtension(
+    for asset: PHAsset,
+    resourceFilename: String? = nil,
+    fallbackPathExtension: String
+  ) -> String {
+    if asset.mediaSubtypes.contains(.photoLive) {
+      return "jpg"
+    }
+    let rawExtension = ((resourceFilename ?? "") as NSString).pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !rawExtension.isEmpty {
+      return rawExtension.lowercased()
+    }
+    let fallback = fallbackPathExtension.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return fallback.isEmpty ? "jpg" : fallback
+  }
+
   private func writeAssetDataToTemp(data: Data, preferredExtension: String) throws -> String {
     let outDir = try ensureCacheDirectory(named: "asset_cache")
     let normalizedExt = preferredExtension.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3342,21 +3400,97 @@ private final class IOSNsfwScanner {
     return out.path
   }
 
-  private func resolveVideoPath(for asset: PHAsset) -> String? {
+  private func resolveVideoPath(for asset: PHAsset) throws -> String? {
     let options = PHVideoRequestOptions()
     options.deliveryMode = .highQualityFormat
     options.isNetworkAccessAllowed = true
 
     let semaphore = DispatchSemaphore(value: 0)
+    var resolvedAsset: AVAsset?
     var resolvedPath: String?
-    PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { avAsset, _, _ in
+    var requestError: Error?
+    photoManager.requestAVAsset(forVideo: asset, options: options) { avAsset, _, info in
+      if let error = info?[PHImageErrorKey] as? Error {
+        requestError = error
+      }
+      resolvedAsset = avAsset
       if let urlAsset = avAsset as? AVURLAsset {
         resolvedPath = urlAsset.url.path
       }
       semaphore.signal()
     }
     semaphore.wait()
-    return resolvedPath
+    if let resolvedPath,
+       !resolvedPath.isEmpty,
+       FileManager.default.fileExists(atPath: resolvedPath) {
+      return resolvedPath
+    }
+    if let resolvedAsset {
+      return try exportVideoAssetToTempFile(
+        asset: resolvedAsset,
+        preferredExtension: "mov"
+      )
+    }
+    if let requestError {
+      throw requestError
+    }
+    return nil
+  }
+
+  private func exportVideoAssetToTempFile(
+    asset: AVAsset,
+    preferredExtension: String
+  ) throws -> String {
+    let compatiblePresets = AVAssetExportSession.exportPresets(compatibleWith: asset)
+    let preferredPresets = [
+      AVAssetExportPresetPassthrough,
+      AVAssetExportPresetHighestQuality,
+      AVAssetExportPresetMediumQuality,
+    ]
+    guard let preset = preferredPresets.first(where: { compatiblePresets.contains($0) }),
+          let session = AVAssetExportSession(asset: asset, presetName: preset) else {
+      throw ScannerError.invalidArgument("Unable to export video asset.")
+    }
+
+    let supportedTypes = session.supportedFileTypes
+    let fileType: AVFileType
+    let fileExtension: String
+    if supportedTypes.contains(.mp4) {
+      fileType = .mp4
+      fileExtension = "mp4"
+    } else if supportedTypes.contains(.mov) {
+      fileType = .mov
+      fileExtension = "mov"
+    } else if let first = supportedTypes.first {
+      fileType = first
+      fileExtension = preferredExtension
+    } else {
+      throw ScannerError.invalidArgument("Unable to determine exported video file type.")
+    }
+
+    let outDir = try ensureCacheDirectory(named: "asset_cache")
+    let out = outDir.appendingPathComponent("asset_\(UUID().uuidString).\(fileExtension)")
+    if FileManager.default.fileExists(atPath: out.path) {
+      try FileManager.default.removeItem(at: out)
+    }
+
+    session.outputURL = out
+    session.outputFileType = fileType
+    session.shouldOptimizeForNetworkUse = true
+
+    let semaphore = DispatchSemaphore(value: 0)
+    session.exportAsynchronously {
+      semaphore.signal()
+    }
+    semaphore.wait()
+
+    if let error = session.error {
+      throw error
+    }
+    guard session.status == .completed, FileManager.default.fileExists(atPath: out.path) else {
+      throw ScannerError.invalidArgument("Video export did not complete successfully.")
+    }
+    return out.path
   }
 
   private func buildGalleryItemPayload(

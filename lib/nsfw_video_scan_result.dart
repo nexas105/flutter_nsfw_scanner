@@ -67,6 +67,8 @@ class NsfwVideoScanResult {
     required this.maxNsfwScore,
     required this.isNsfw,
     required this.frames,
+    this.requiredNsfwFrames = 1,
+    this.fallbackMode,
   });
 
   final String videoPath;
@@ -77,6 +79,8 @@ class NsfwVideoScanResult {
   final double maxNsfwScore;
   final bool isNsfw;
   final List<NsfwVideoFrameResult> frames;
+  final int requiredNsfwFrames;
+  final String? fallbackMode;
 
   factory NsfwVideoScanResult.fromMap(Map<String, dynamic> map) {
     final rawFrames = map['frames'];
@@ -103,6 +107,10 @@ class NsfwVideoScanResult {
       maxNsfwScore: _toDouble(map['maxNsfwScore']),
       isNsfw: map['isNsfw'] == true,
       frames: frames,
+      requiredNsfwFrames: _toInt(map['requiredNsfwFrames']) < 1
+          ? 1
+          : _toInt(map['requiredNsfwFrames']),
+      fallbackMode: map['fallbackMode']?.toString(),
     );
   }
 
