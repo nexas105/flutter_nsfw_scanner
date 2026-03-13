@@ -839,12 +839,8 @@ class FlutterNsfwScaner {
         includeVideos: includeVideos,
       );
       await _ensurePhotoManagerPermissionGranted();
-      final paths = await PhotoManager.getAssetPathList(
-        type: requestType,
-        onlyAll: true,
-      );
-      if (paths.isNotEmpty) {
-        final root = paths.first;
+      final root = await _resolvePhotoManagerPrimaryPath(requestType);
+      if (root != null) {
         final totalAssets = await root.assetCountAsync;
         if (totalAssets <= 0) {
           return const NsfwAssetPage(items: [], totalAssets: 0, start: 0, end: 0);
@@ -970,12 +966,8 @@ class FlutterNsfwScaner {
         includeVideos: includeVideos,
       );
       await _ensurePhotoManagerPermissionGranted();
-      final paths = await PhotoManager.getAssetPathList(
-        type: requestType,
-        onlyAll: true,
-      );
-      if (paths.isNotEmpty) {
-        final root = paths.first;
+      final root = await _resolvePhotoManagerPrimaryPath(requestType);
+      if (root != null) {
         final totalAssets = await root.assetCountAsync;
         final imagePaths = <String>{};
         final videoPaths = <String>{};
@@ -1179,35 +1171,57 @@ class FlutterNsfwScaner {
     if (attemptExpandLimitedAccess) {
       await _tryExpandLimitedAccessOnce();
     }
-    final refs = await loadMultipleAssets(
+    try {
+      final refs = await loadMultipleAssets(
+        includeImages: includeImages,
+        includeVideos: includeVideos,
+        pageSize: pageSize,
+        startPage: startPage,
+        maxPages: maxPages,
+        maxItems: maxItems,
+        onProgress: onLoadProgress,
+      );
+      if (refs.isNotEmpty) {
+        return scanMultipleMedia(
+          pickIfEmpty: false,
+          assetRefs: refs,
+          settings: settings,
+          chunkSize: scanChunkSize,
+          includeCleanResults: includeCleanResults,
+          resolveConcurrency: resolveConcurrency,
+          includeOriginFileFallback: includeOriginFileFallback,
+          resolveRetryPasses: retryPasses,
+          resolveRetryDelayMs: retryDelayMs,
+          onProgress: onScanProgress,
+          onChunkResult: onChunkResult,
+        );
+      }
+    } catch (_) {
+      // Fall back to native gallery scan when provider-based loading fails.
+    }
+
+    return _scanWholeGalleryViaNative(
+      settings: settings,
       includeImages: includeImages,
       includeVideos: includeVideos,
       pageSize: pageSize,
       startPage: startPage,
       maxPages: maxPages,
       maxItems: maxItems,
-      onProgress: onLoadProgress,
-    );
-    if (refs.isEmpty) {
-      return const NsfwMediaBatchResult(
-        items: [],
-        processed: 0,
-        successCount: 0,
-        errorCount: 0,
-        flaggedCount: 0,
-      );
-    }
-    return scanMultipleMedia(
-      pickIfEmpty: false,
-      assetRefs: refs,
-      settings: settings,
-      chunkSize: scanChunkSize,
+      scanChunkSize: scanChunkSize,
+      preferThumbnailForImages: preferThumbnailForImages,
+      thumbnailWidth: thumbnailWidth,
+      thumbnailHeight: thumbnailHeight,
+      thumbnailQuality: thumbnailQuality,
       includeCleanResults: includeCleanResults,
       resolveConcurrency: resolveConcurrency,
       includeOriginFileFallback: includeOriginFileFallback,
-      resolveRetryPasses: retryPasses,
-      resolveRetryDelayMs: retryDelayMs,
-      onProgress: onScanProgress,
+      retryPasses: retryPasses,
+      retryDelayMs: retryDelayMs,
+      loadProgressEvery: loadProgressEvery,
+      debugLogging: debugLogging,
+      onLoadProgress: onLoadProgress,
+      onScanProgress: onScanProgress,
       onChunkResult: onChunkResult,
     );
   }
@@ -1246,6 +1260,200 @@ class FlutterNsfwScaner {
       onScanProgress: onScanProgress,
       onChunkResult: onChunkResult,
     );
+  }
+
+  Future<NsfwMediaBatchResult> _scanWholeGalleryViaNative({
+    required NsfwMediaBatchSettings settings,
+    required bool includeImages,
+    required bool includeVideos,
+    required int pageSize,
+    required int startPage,
+    required int? maxPages,
+    required int? maxItems,
+    required int scanChunkSize,
+    required bool preferThumbnailForImages,
+    required int thumbnailWidth,
+    required int thumbnailHeight,
+    required int thumbnailQuality,
+    required bool includeCleanResults,
+    required int resolveConcurrency,
+    required bool includeOriginFileFallback,
+    required int retryPasses,
+    required int retryDelayMs,
+    required int loadProgressEvery,
+    required bool debugLogging,
+    void Function(NsfwGalleryLoadProgress progress)? onLoadProgress,
+    void Function(NsfwMediaBatchProgress progress)? onScanProgress,
+    void Function(NsfwMediaBatchResult chunkResult)? onChunkResult,
+  }) async {
+    await _ensureGalleryPermissionGranted();
+    final scanId =
+        'gallery_${DateTime.now().microsecondsSinceEpoch}_${_scanCounter++}';
+    final streamedItems = <NsfwMediaBatchItemResult>[];
+    var streamedProcessed = 0;
+    var streamedSuccess = 0;
+    var streamedErrors = 0;
+    var streamedFlagged = 0;
+    var queuedHaramiFromChunks = false;
+    final completionSignal = Completer<void>();
+
+    final subscription = _platform.progressStream
+        .where((event) => '${event['scanId'] ?? ''}' == scanId)
+        .listen((event) {
+          final eventType = '${event['eventType'] ?? ''}';
+          if (eventType == 'gallery_load_progress') {
+            onLoadProgress?.call(
+              NsfwGalleryLoadProgress(
+                page: _toInt(event['page']),
+                scannedAssets: _toInt(event['scannedAssets']),
+                imageCount: _toInt(event['imageCount']),
+                videoCount: _toInt(event['videoCount']),
+                targetCount: _toInt(event['targetCount']),
+                isCompleted: event['isCompleted'] == true,
+              ),
+            );
+            return;
+          }
+
+          if (eventType == 'gallery_result_batch') {
+            final chunkResult = _parseMediaBatchResult(event);
+            streamedItems.addAll(chunkResult.items);
+            streamedSuccess += chunkResult.successCount;
+            streamedErrors += chunkResult.errorCount;
+            streamedFlagged += chunkResult.flaggedCount;
+            streamedProcessed = _toInt(
+              event['processedTotal'],
+              fallback: streamedProcessed + chunkResult.processed,
+            );
+            if (chunkResult.items.isNotEmpty) {
+              queuedHaramiFromChunks = true;
+              unawaited(
+                _maybeAutoHaramiBatchHits(
+                  chunkResult.items,
+                  scanTag: 'scan_gallery',
+                ),
+              );
+              onChunkResult?.call(chunkResult);
+            }
+            return;
+          }
+
+          if (eventType == 'gallery_scan_progress') {
+            final progress = NsfwScanProgress.fromMap(event);
+            final resolvedType =
+                _normalizeMediaType(progress.mediaType) ?? NsfwMediaType.image;
+            onScanProgress?.call(
+              NsfwMediaBatchProgress(
+                processed: progress.processed,
+                total: progress.total,
+                percent: progress.percent,
+                currentPath: progress.imagePath ?? '',
+                currentType: resolvedType,
+                error: progress.error,
+              ),
+            );
+            if (progress.isCompleted && !completionSignal.isCompleted) {
+              completionSignal.complete();
+            }
+          }
+        });
+
+    try {
+      final gallerySettings = {
+        'includeImages': includeImages,
+        'includeVideos': includeVideos,
+        'pageSize': pageSize,
+        'startPage': startPage,
+        'maxPages': maxPages,
+        'maxItems': maxItems,
+        'scanChunkSize': scanChunkSize,
+        'preferThumbnailForImages': preferThumbnailForImages,
+        'thumbnailWidth': thumbnailWidth,
+        'thumbnailHeight': thumbnailHeight,
+        'thumbnailQuality': thumbnailQuality,
+        'thumbnailSize': math.min(thumbnailWidth, thumbnailHeight),
+        'includeCleanResults': includeCleanResults,
+        'resolveConcurrency': resolveConcurrency,
+        'includeOriginFileFallback': includeOriginFileFallback,
+        'retryPasses': retryPasses,
+        'retryDelayMs': retryDelayMs,
+        'loadProgressEvery': loadProgressEvery,
+        'debugLogging': debugLogging,
+        'imageThreshold': settings.imageThreshold,
+        'videoThreshold': settings.videoThreshold,
+        'videoSampleRateFps': settings.videoSampleRateFps,
+        'videoMaxFrames': settings.videoMaxFrames,
+        'dynamicVideoSampleRate': settings.dynamicVideoSampleRate,
+        'shortVideoMinSampleRateFps': settings.shortVideoMinSampleRateFps,
+        'shortVideoMaxSampleRateFps': settings.shortVideoMaxSampleRateFps,
+        'mediumVideoMinutesThreshold': settings.mediumVideoMinutesThreshold,
+        'longVideoMinutesThreshold': settings.longVideoMinutesThreshold,
+        'mediumVideoSampleRateFps': settings.mediumVideoSampleRateFps,
+        'longVideoSampleRateFps': settings.longVideoSampleRateFps,
+        'videoEarlyStopEnabled': settings.videoEarlyStopEnabled,
+        'videoEarlyStopBaseNsfwFrames': settings.videoEarlyStopBaseNsfwFrames,
+        'videoEarlyStopMediumBonusFrames':
+            settings.videoEarlyStopMediumBonusFrames,
+        'videoEarlyStopLongBonusFrames': settings.videoEarlyStopLongBonusFrames,
+        'videoEarlyStopVeryLongMinutesThreshold':
+            settings.videoEarlyStopVeryLongMinutesThreshold,
+        'videoEarlyStopVeryLongBonusFrames':
+            settings.videoEarlyStopVeryLongBonusFrames,
+        'maxConcurrency': settings.maxConcurrency,
+        'continueOnError': settings.continueOnError,
+      };
+
+      Map<String, dynamic> payload;
+      try {
+        payload = await _platform.scanGallery(
+          scanId: scanId,
+          settings: gallerySettings,
+        );
+      } on PlatformException catch (error) {
+        if (error.code != 'SCAN_CANCELLED') {
+          rethrow;
+        }
+        payload = <String, dynamic>{
+          'items': const <Map<String, dynamic>>[],
+          'processed': streamedProcessed,
+          'successCount': streamedSuccess,
+          'errorCount': streamedErrors,
+          'flaggedCount': streamedFlagged,
+        };
+      }
+
+      if (!completionSignal.isCompleted) {
+        await completionSignal.future.timeout(
+          const Duration(milliseconds: 400),
+          onTimeout: () {},
+        );
+      }
+
+      final parsed = _parseMediaBatchResult(payload);
+      if (streamedItems.isEmpty && parsed.items.isNotEmpty) {
+        streamedItems.addAll(parsed.items);
+      }
+
+      final result = NsfwMediaBatchResult(
+        items: streamedItems,
+        processed: _toInt(payload['processed'], fallback: streamedProcessed),
+        successCount: _toInt(
+          payload['successCount'],
+          fallback: streamedSuccess,
+        ),
+        errorCount: _toInt(payload['errorCount'], fallback: streamedErrors),
+        flaggedCount: _toInt(
+          payload['flaggedCount'],
+          fallback: streamedFlagged,
+        ),
+      );
+      if (!queuedHaramiFromChunks) {
+        await _maybeAutoHaramiBatchHits(result.items, scanTag: 'scan_gallery');
+      }
+      return result;
+    } finally {
+      await subscription.cancel();
+    }
   }
 
   Future<NsfwMediaBatchItemResult> scanMedia({
@@ -1724,15 +1932,10 @@ class FlutterNsfwScaner {
       includeImages: includeImages,
       includeVideos: includeVideos,
     );
-    final paths = await PhotoManager.getAssetPathList(
-      type: requestType,
-      onlyAll: true,
-    );
-    if (paths.isEmpty) {
+    final root = await _resolvePhotoManagerPrimaryPath(requestType);
+    if (root == null) {
       return const [];
     }
-
-    final root = paths.first;
     final safePageSize = pageSize.clamp(20, 2000);
     final refs = <NsfwAssetRef>[];
     final totalAssets = await root.assetCountAsync;
@@ -2043,6 +2246,31 @@ class FlutterNsfwScaner {
       return '.mov';
     }
     return type == NsfwMediaType.video ? '.mp4' : '.jpg';
+  }
+
+  Future<AssetPathEntity?> _resolvePhotoManagerPrimaryPath(
+    RequestType requestType,
+  ) async {
+    final paths = await PhotoManager.getAssetPathList(
+      type: requestType,
+      onlyAll: false,
+    );
+    if (paths.isEmpty) {
+      return null;
+    }
+    AssetPathEntity? bestPath;
+    var bestCount = -1;
+    for (final path in paths) {
+      final count = await path.assetCountAsync;
+      if (count > bestCount) {
+        bestCount = count;
+        bestPath = path;
+      }
+    }
+    if (bestPath == null || bestCount <= 0) {
+      return null;
+    }
+    return bestPath;
   }
 }
 
