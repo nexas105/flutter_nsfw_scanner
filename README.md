@@ -192,6 +192,7 @@ await scanner.initialize(
 
 Notes:
 - The cache is stored in native SQLite inside the app sandbox.
+- The cache is automatically scoped to the current build version. A new app build creates a fresh scan cache namespace, so scans are not skipped across build updates unless you keep build version constant intentionally.
 - Cache identity is based on the native gallery asset id.
 - Only successful whole-gallery scan items are written to the cache.
 - `processed` includes skipped items, and `skippedCount` tells you how many were avoided because they were already cached.

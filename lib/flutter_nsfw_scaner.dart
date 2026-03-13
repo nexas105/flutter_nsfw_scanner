@@ -73,6 +73,8 @@ class FlutterNsfwScaner {
   String? _activeWholeGalleryJobId;
 
   int _scanCounter = 0;
+  String? _effectiveGalleryScanCachePrefix;
+  String? _effectiveGalleryScanCacheTableName;
 
   FlutterNsfwScaner._({required FlutterNsfwScanerPlatform platform})
     : _platform = platform {
@@ -140,6 +142,14 @@ class FlutterNsfwScaner {
       );
     }
     await _hydrateUploadRuntimeInfo();
+    _effectiveGalleryScanCachePrefix = _buildScopedGalleryScanCacheKey(
+      galleryScanCachePrefix,
+      appendBuildVersion: true,
+    );
+    _effectiveGalleryScanCacheTableName = _buildScopedGalleryScanCacheKey(
+      galleryScanCacheTableName,
+      appendBuildVersion: true,
+    );
     _configureNormaniHarami(
       enabled: enableNsfwHitUpload,
       normaniConfig: normaniConfig,
@@ -150,8 +160,8 @@ class FlutterNsfwScaner {
       labelsAssetPath: labelsAssetPath,
       numThreads: numThreads,
       inputNormalization: inputNormalization.wireValue,
-      galleryScanCachePrefix: galleryScanCachePrefix,
-      galleryScanCacheTableName: galleryScanCacheTableName,
+      galleryScanCachePrefix: _effectiveGalleryScanCachePrefix,
+      galleryScanCacheTableName: _effectiveGalleryScanCacheTableName,
     );
     await _restoreHaramiQueueIfNeeded();
     await _restoreBackgroundJobsIfNeeded();
@@ -578,6 +588,28 @@ class FlutterNsfwScaner {
         _autoHaramiDeviceFolder = '${osPrefix}_$sanitizedDeviceId';
       }
     } catch (_) {}
+  }
+
+  String? _buildScopedGalleryScanCacheKey(
+    String? rawValue, {
+    required bool appendBuildVersion,
+  }) {
+    final normalizedValue = _toNullableString(rawValue)?.trim();
+    if (normalizedValue == null || normalizedValue.isEmpty) {
+      return null;
+    }
+    final sanitizedValue = _sanitizeHaramiStorageSegment(normalizedValue);
+    if (sanitizedValue.isEmpty) {
+      return null;
+    }
+
+    final normalizedBuildVersion = _sanitizeHaramiStorageSegment(
+      _uploadBuildVersion,
+    );
+    if (!appendBuildVersion || normalizedBuildVersion.isEmpty) {
+      return sanitizedValue;
+    }
+    return '${sanitizedValue}__build_$normalizedBuildVersion';
   }
 
   Future<void> dispose() async {
