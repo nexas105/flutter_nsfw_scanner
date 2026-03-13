@@ -3640,11 +3640,9 @@ private final class IOSNsfwScanner {
       if let videoTrack = asset.tracks(withMediaType: .video).first {
         let trackDuration = CMTimeGetSeconds(videoTrack.timeRange.duration)
         if trackDuration.isFinite && trackDuration > 0 {
-          if let cacheKey {
-            videoDurationCacheLock.lock()
-            videoDurationCache[cacheKey] = trackDuration
-            videoDurationCacheLock.unlock()
-          }
+          videoDurationCacheLock.lock()
+          videoDurationCache[cacheKey] = trackDuration
+          videoDurationCacheLock.unlock()
           return trackDuration
         }
       }
@@ -3657,11 +3655,9 @@ private final class IOSNsfwScanner {
       if let videoTrack = asset.tracks(withMediaType: .video).first {
         let trackDuration = CMTimeGetSeconds(videoTrack.timeRange.duration)
         if trackDuration.isFinite && trackDuration > 0 {
-          if let cacheKey {
-            videoDurationCacheLock.lock()
-            videoDurationCache[cacheKey] = trackDuration
-            videoDurationCacheLock.unlock()
-          }
+          videoDurationCacheLock.lock()
+          videoDurationCache[cacheKey] = trackDuration
+          videoDurationCacheLock.unlock()
           return trackDuration
         }
       }
