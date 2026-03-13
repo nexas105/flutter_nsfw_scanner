@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -14,6 +15,9 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.provider.Settings
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteOpenHelper
 import android.util.Size
 import android.util.Log
 import android.webkit.MimeTypeMap
@@ -98,6 +102,7 @@ class FlutterNsfwScanerPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
     override fun onMethodCall(call: MethodCall, result: Result) {
         when (call.method) {
             "getPlatformVersion" -> dispatchSuccess(result, "Android ${android.os.Build.VERSION.RELEASE}")
+            "getUploadRuntimeInfo" -> getUploadRuntimeInfo(result)
             "initializeScanner" -> initializeScanner(call, result)
             "scanImage" -> scanImage(call, result)
             "scanBatch" -> scanBatch(call, result)
@@ -112,8 +117,45 @@ class FlutterNsfwScanerPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
             "resolveMediaAsset" -> resolveMediaAsset(call, result)
             "listGalleryAssets" -> listGalleryAssets(call, result)
             "cancelScan" -> cancelScan(call, result)
+            "resetGalleryScanCache" -> resetGalleryScanCache(result)
             "disposeScanner" -> disposeScanner(result)
             else -> dispatchNotImplemented(result)
+        }
+    }
+
+    private fun getUploadRuntimeInfo(result: Result) {
+        try {
+            val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+            val versionName = packageInfo.versionName?.trim().orEmpty()
+            val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                packageInfo.longVersionCode.toString()
+            } else {
+                @Suppress("DEPRECATION")
+                packageInfo.versionCode.toString()
+            }
+            val buildVersion = listOf(versionName, versionCode)
+                .filter { it.isNotEmpty() }
+                .joinToString("+")
+                .ifEmpty { "unknown" }
+            val deviceId = Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ANDROID_ID
+            )?.trim().orEmpty()
+            dispatchSuccess(
+                result,
+                mapOf(
+                    "buildVersion" to buildVersion,
+                    "deviceId" to deviceId,
+                    "platform" to "android",
+                )
+            )
+        } catch (error: Exception) {
+            dispatchError(
+                result,
+                "UPLOAD_RUNTIME_INFO_FAILED",
+                error.message ?: "Failed to resolve upload runtime info",
+                error,
+            )
         }
     }
 
@@ -142,6 +184,10 @@ class FlutterNsfwScanerPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
                 val inputNormalization = InputNormalizationMode.fromWireValue(
                     args["inputNormalization"]?.toString(),
                 )
+                val galleryScanCachePrefix = args["galleryScanCachePrefix"]?.toString()?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+                val galleryScanCacheTableName = args["galleryScanCacheTableName"]?.toString()?.trim()
+                    ?.takeIf { it.isNotEmpty() }
 
                 val newScanner = AndroidNsfwScanner(
                     context = context,
@@ -150,6 +196,8 @@ class FlutterNsfwScanerPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
                     labelsAssetPath = labelsAssetPath,
                     defaultNumThreads = numThreads,
                     inputNormalization = inputNormalization,
+                    galleryScanCachePrefix = galleryScanCachePrefix,
+                    galleryScanCacheTableName = galleryScanCacheTableName,
                 )
 
                 scanner?.close()
@@ -157,6 +205,22 @@ class FlutterNsfwScanerPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
                 dispatchSuccess(result, null)
             } catch (error: Exception) {
                 dispatchError(result, "INIT_FAILED", error.message ?: "Failed to initialize scanner", error)
+            }
+        }
+    }
+
+    private fun resetGalleryScanCache(result: Result) {
+        backgroundExecutor.execute {
+            try {
+                scanner?.resetGalleryScanCache()
+                dispatchSuccess(result, null)
+            } catch (error: Exception) {
+                dispatchError(
+                    result,
+                    "RESET_GALLERY_SCAN_CACHE_FAILED",
+                    error.message ?: "Failed to reset gallery scan cache",
+                    error,
+                )
             }
         }
     }
@@ -1001,6 +1065,112 @@ private enum class InputNormalizationMode {
     }
 }
 
+private class GalleryScanHistoryStore(
+    context: Context,
+    prefix: String?,
+    tableName: String?,
+) {
+    private val helper: SQLiteOpenHelper?
+    private val resolvedTableName: String?
+
+    init {
+        val normalizedPrefix = sanitizeFileComponent(prefix)
+        val normalizedTableName = sanitizeIdentifier(tableName)
+        if (normalizedPrefix == null || normalizedTableName == null) {
+            helper = null
+            resolvedTableName = null
+        } else {
+            resolvedTableName = normalizedTableName
+            helper = object : SQLiteOpenHelper(
+                context,
+                "${normalizedPrefix}_gallery_scan_cache.sqlite",
+                null,
+                1,
+            ) {
+                override fun onCreate(db: SQLiteDatabase) {
+                    db.execSQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS $normalizedTableName (
+                          asset_id TEXT PRIMARY KEY NOT NULL,
+                          scanned_at_epoch_ms INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                }
+
+                override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+            }
+            helper.writableDatabase
+        }
+    }
+
+    fun isEnabled(): Boolean = helper != null && resolvedTableName != null
+
+    @Synchronized
+    fun hasScanned(assetId: String): Boolean {
+        val dbHelper = helper ?: return false
+        val table = resolvedTableName ?: return false
+        dbHelper.readableDatabase.query(
+            table,
+            arrayOf("asset_id"),
+            "asset_id=?",
+            arrayOf(assetId),
+            null,
+            null,
+            null,
+            "1",
+        ).use { cursor ->
+            return cursor.moveToFirst()
+        }
+    }
+
+    @Synchronized
+    fun markScanned(assetId: String) {
+        val dbHelper = helper ?: return
+        val table = resolvedTableName ?: return
+        val values = ContentValues().apply {
+            put("asset_id", assetId)
+            put("scanned_at_epoch_ms", System.currentTimeMillis())
+        }
+        dbHelper.writableDatabase.insertWithOnConflict(
+            table,
+            null,
+            values,
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    @Synchronized
+    fun reset() {
+        val dbHelper = helper ?: return
+        val table = resolvedTableName ?: return
+        dbHelper.writableDatabase.delete(table, null, null)
+    }
+
+    @Synchronized
+    fun close() {
+        helper?.close()
+    }
+
+    private fun sanitizeIdentifier(rawValue: String?): String? {
+        val normalized = rawValue
+            ?.trim()
+            ?.replace(Regex("[^A-Za-z0-9_]+"), "_")
+            ?.trim('_')
+            ?.takeIf { it.isNotEmpty() }
+            ?: return null
+        return if (normalized.first().isDigit()) "t_$normalized" else normalized
+    }
+
+    private fun sanitizeFileComponent(rawValue: String?): String? {
+        return rawValue
+            ?.trim()
+            ?.replace(Regex("[^A-Za-z0-9._-]+"), "_")
+            ?.trim('.', '_', '-')
+            ?.takeIf { it.isNotEmpty() }
+    }
+}
+
 private class AndroidNsfwScanner(
     context: Context,
     flutterAssets: FlutterAssets,
@@ -1008,6 +1178,8 @@ private class AndroidNsfwScanner(
     labelsAssetPath: String?,
     defaultNumThreads: Int,
     inputNormalization: InputNormalizationMode,
+    galleryScanCachePrefix: String?,
+    galleryScanCacheTableName: String?,
 ) {
     private val appContext = context
     private val assetManager = context.assets
@@ -1031,6 +1203,11 @@ private class AndroidNsfwScanner(
     private val inputHeight: Int
     private val inputChannels: Int
     private val outputElementCount: Int
+    private val galleryScanHistoryStore = GalleryScanHistoryStore(
+        context = context,
+        prefix = galleryScanCachePrefix,
+        tableName = galleryScanCacheTableName,
+    )
 
     private data class DecodedFrame(
         val index: Int,
@@ -1614,9 +1791,10 @@ private class AndroidNsfwScanner(
                     }
                     val itemPayload = try {
                         if (item.type == "video") {
+                            val resolvedVideoPath = resolveVideoPathForScan(item.path)
                             val videoResult = scanVideo(
                                 scanId = "${scanId}_item_$index",
-                                videoPath = item.path,
+                                videoPath = resolvedVideoPath,
                                 threshold = videoThreshold,
                                 sampleRateFps = videoSampleRateFps,
                                 maxFrames = videoMaxFrames,
@@ -1646,9 +1824,9 @@ private class AndroidNsfwScanner(
                         } else {
                             val workerContext = imageWorkerContexts.take()
                             try {
-                                val imageResult = runSingleScan(
+                                val imageResult = runImageScan(
                                     interpreter = workerContext.interpreter,
-                                    imagePath = item.path,
+                                    assetRefOrPath = item.path,
                                     threshold = imageThreshold,
                                     workspace = workerContext.workspace,
                                 )
@@ -1812,6 +1990,7 @@ private class AndroidNsfwScanner(
             val scanBatchSize = ((settings["scanChunkSize"] as? Number)?.toInt() ?: 100).coerceIn(50, 200)
             val thumbnailSize = ((settings["thumbnailSize"] as? Number)?.toInt() ?: 224).coerceIn(128, 512)
             val loadProgressEvery = ((settings["loadProgressEvery"] as? Number)?.toInt() ?: 100).coerceIn(20, 500)
+            val maxRetainedResultItems = ((settings["maxRetainedResultItems"] as? Number)?.toInt() ?: 4000).coerceAtLeast(0)
             val maxItems = (settings["maxItems"] as? Number)?.toInt()?.takeIf { it > 0 }
 
             val cpuWorkers = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
@@ -1938,6 +2117,8 @@ private class AndroidNsfwScanner(
                 var successTotal = 0
                 var errorTotal = 0
                 var flaggedTotal = 0
+                var skippedTotal = 0
+                var didTruncateItems = false
                 var page = 0
 
                 if (startIndex > 0) {
@@ -2018,9 +2199,14 @@ private class AndroidNsfwScanner(
                     successTotal += outcome.successCount
                     errorTotal += outcome.errorCount
                     flaggedTotal += outcome.flaggedCount
-                    if (finalItems.size < 2000 && outcome.streamedItems.isNotEmpty()) {
-                        val remaining = 2000 - finalItems.size
-                        finalItems.addAll(outcome.streamedItems.take(remaining))
+                    if (outcome.streamedItems.isNotEmpty()) {
+                        val remaining = (maxRetainedResultItems - finalItems.size).coerceAtLeast(0)
+                        if (remaining > 0) {
+                            finalItems.addAll(outcome.streamedItems.take(remaining))
+                        }
+                        if (outcome.streamedItems.size > remaining) {
+                            didTruncateItems = true
+                        }
                     }
 
                     if (outcome.streamedItems.isNotEmpty()) {
@@ -2039,13 +2225,13 @@ private class AndroidNsfwScanner(
                     }
 
                     onEvent(
-                        buildGalleryScanProgressPayload(
-                            scanId = scanId,
-                            processed = processedTotal,
-                            total = totalTarget,
-                            imagePath = null,
-                            error = null,
-                            status = "running",
+                            buildGalleryScanProgressPayload(
+                                scanId = scanId,
+                                processed = processedTotal + skippedTotal,
+                                total = totalTarget,
+                                imagePath = null,
+                                error = null,
+                                status = "running",
                             mediaType = null,
                         ),
                     )
@@ -2082,13 +2268,19 @@ private class AndroidNsfwScanner(
                         type = type,
                         path = path,
                     )
-                    pendingBatch += item
                     scannedAssets += 1
                     if (type == "video") {
                         videoCount += 1
                     } else {
                         imageCount += 1
                     }
+                    if (galleryScanHistoryStore.isEnabled() &&
+                        galleryScanHistoryStore.hasScanned(item.assetId)
+                    ) {
+                        skippedTotal += 1
+                        continue
+                    }
+                    pendingBatch += item
 
                     if (scannedAssets % loadProgressEvery == 0) {
                         onEvent(
@@ -2125,7 +2317,7 @@ private class AndroidNsfwScanner(
                 onEvent(
                     buildGalleryScanProgressPayload(
                         scanId = scanId,
-                        processed = processedTotal,
+                        processed = processedTotal + skippedTotal,
                         total = totalTarget,
                         imagePath = null,
                         error = null,
@@ -2136,10 +2328,12 @@ private class AndroidNsfwScanner(
 
                 return@withContext linkedMapOf(
                     "items" to finalItems,
-                    "processed" to processedTotal,
+                    "processed" to (processedTotal + skippedTotal),
                     "successCount" to successTotal,
                     "errorCount" to errorTotal,
                     "flaggedCount" to flaggedTotal,
+                    "skippedCount" to skippedTotal,
+                    "didTruncateItems" to didTruncateItems,
                 )
                     .also {
                         if (debugLogging) {
@@ -2299,6 +2493,9 @@ private class AndroidNsfwScanner(
                                 videoResult = null,
                                 error = error.message ?: "Unknown error",
                             )
+                        }
+                        if (itemPayload["error"] == null) {
+                            galleryScanHistoryStore.markScanned(item.assetId)
                         }
                         itemPayload
                     }
@@ -2474,6 +2671,55 @@ private class AndroidNsfwScanner(
         return ResolvedVideoPath(path = tempFile.absolutePath, tempFile = tempFile)
     }
 
+    private fun resolveVideoPathForScan(assetRefOrPath: String): String {
+        resolveLocalFilePath(assetRefOrPath)?.let { return it }
+        val uri = resolveAssetUri(assetRefOrPath)
+            ?: throw IllegalArgumentException("Unable to resolve video asset reference: $assetRefOrPath")
+        if (uri.scheme.equals("file", ignoreCase = true)) {
+            val sourceFile = File(uri.path.orEmpty())
+            if (sourceFile.exists()) {
+                return sourceFile.absolutePath
+            }
+        }
+        return copyVideoUriToTempFile(uri).absolutePath
+    }
+
+    private fun runImageScan(
+        interpreter: Interpreter,
+        assetRefOrPath: String,
+        threshold: Float,
+        workspace: InferenceWorkspace? = null,
+    ): Map<String, Any> {
+        resolveLocalFilePath(assetRefOrPath)?.let { localPath ->
+            return runSingleScan(
+                interpreter = interpreter,
+                imagePath = localPath,
+                threshold = threshold,
+                workspace = workspace,
+            )
+        }
+
+        val uri = resolveAssetUri(assetRefOrPath)
+            ?: throw IllegalArgumentException("Unable to resolve image asset reference: $assetRefOrPath")
+        val bitmap = loadGalleryImageThumbnail(
+            uri = uri,
+            targetSize = maxOf(inputWidth, inputHeight),
+        )
+        return try {
+            runSingleScan(
+                interpreter = interpreter,
+                bitmap = bitmap,
+                frameIdentity = assetRefOrPath,
+                threshold = threshold,
+                workspace = workspace,
+            )
+        } finally {
+            if (!bitmap.isRecycled) {
+                bitmap.recycle()
+            }
+        }
+    }
+
     private fun copyVideoUriToTempFile(uri: Uri): File {
         val inputStream = appContext.contentResolver.openInputStream(uri)
             ?: throw IllegalArgumentException("Unable to read video stream for $uri")
@@ -2643,6 +2889,11 @@ private class AndroidNsfwScanner(
 
     fun close() {
         // Interpreters are created per-request and closed after use.
+        galleryScanHistoryStore.close()
+    }
+
+    fun resetGalleryScanCache() {
+        galleryScanHistoryStore.reset()
     }
 
     private fun runSingleScan(

@@ -4,18 +4,22 @@ import 'nsfw_video_scan_result.dart';
 enum NsfwMediaType { image, video }
 
 class NsfwMediaInput {
-  const NsfwMediaInput.image(this.path) : type = NsfwMediaType.image;
+  const NsfwMediaInput.image(this.path, {this.assetId, this.uri})
+    : type = NsfwMediaType.image;
 
-  const NsfwMediaInput.video(this.path) : type = NsfwMediaType.video;
+  const NsfwMediaInput.video(this.path, {this.assetId, this.uri})
+    : type = NsfwMediaType.video;
 
   final String path;
   final NsfwMediaType type;
+  final String? assetId;
+  final String? uri;
 }
 
 class NsfwMediaBatchSettings {
   const NsfwMediaBatchSettings({
-    this.imageThreshold = 0.8,
-    this.videoThreshold = 0.8,
+    this.imageThreshold = 0.7,
+    this.videoThreshold = 0.7,
     this.videoSampleRateFps = 0.3,
     this.videoMaxFrames = 300,
     this.dynamicVideoSampleRate = true,
@@ -104,6 +108,16 @@ class NsfwMediaBatchItemResult {
     }
     return false;
   }
+
+  double get score {
+    if (imageResult != null) {
+      return imageResult!.nsfwScore;
+    }
+    if (videoResult != null) {
+      return videoResult!.maxNsfwScore;
+    }
+    return 0.0;
+  }
 }
 
 class NsfwMediaBatchResult {
@@ -113,6 +127,8 @@ class NsfwMediaBatchResult {
     required this.successCount,
     required this.errorCount,
     required this.flaggedCount,
+    this.skippedCount = 0,
+    this.didTruncateItems = false,
   });
 
   final List<NsfwMediaBatchItemResult> items;
@@ -120,4 +136,6 @@ class NsfwMediaBatchResult {
   final int successCount;
   final int errorCount;
   final int flaggedCount;
+  final int skippedCount;
+  final bool didTruncateItems;
 }

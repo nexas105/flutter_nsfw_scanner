@@ -219,6 +219,10 @@ void main() {
     await platform.cancelScan(scanId: 'scan_1');
   });
 
+  test('resetGalleryScanCache calls platform method', () async {
+    await platform.resetGalleryScanCache();
+  });
+
   test('loadImageThumbnail returns cached thumbnail path', () async {
     final response = await platform.loadImageThumbnail(
       assetRef: 'ph://A-B-C',
