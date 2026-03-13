@@ -1,3 +1,8 @@
+## 1.1.1
+
+- Improved iOS cloud-image materialization in whole-gallery scanning: image resolve now uses a full fallback chain (`requestImageDataAndOrientation` -> `PHAssetResourceManager` download -> rendered image export) instead of failing after a single data read path.
+- Hardened iOS PhotoKit image requests for cloud assets by handling cancelled/degraded callbacks more safely, reducing missed scans for temporarily unavailable iCloud photos.
+
 ## 1.1.0
 
 - Added robust large-scan defaults across multi-asset flows: adaptive chunk sizing/backpressure is now applied in Dart for `scanMediaInChunks` and `scanMultipleMedia`.

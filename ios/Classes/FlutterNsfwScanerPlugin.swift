@@ -2707,6 +2707,7 @@ private final class IOSNsfwScanner {
     let semaphore = DispatchSemaphore(value: 0)
     var requestedImage: UIImage?
     var requestError: Error?
+    var wasCancelled = false
 
     manager.requestImage(
       for: asset,
@@ -2717,13 +2718,17 @@ private final class IOSNsfwScanner {
       if let error = info?[PHImageErrorKey] as? Error {
         requestError = error
       }
+      let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+      if cancelled {
+        wasCancelled = true
+      }
       let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
       if let image, !degraded {
         requestedImage = image
       } else if requestedImage == nil, let image {
         requestedImage = image
       }
-      if !degraded {
+      if !degraded || cancelled {
         semaphore.signal()
       }
     }
@@ -2736,6 +2741,11 @@ private final class IOSNsfwScanner {
         )
       }
       throw requestError
+    }
+    if wasCancelled, requestedImage == nil {
+      throw ScannerError.invalidArgument(
+        "Unable to fetch thumbnail for asset \(asset.localIdentifier): request cancelled"
+      )
     }
     if let cgImage = requestedImage?.cgImage {
       return cgImage
@@ -2776,6 +2786,7 @@ private final class IOSNsfwScanner {
     let semaphore = DispatchSemaphore(value: 0)
     var requestedImage: UIImage?
     var requestError: Error?
+    var wasCancelled = false
 
     manager.requestImage(
       for: asset,
@@ -2786,13 +2797,17 @@ private final class IOSNsfwScanner {
       if let error = info?[PHImageErrorKey] as? Error {
         requestError = error
       }
+      let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+      if cancelled {
+        wasCancelled = true
+      }
       let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
       if let image, !degraded {
         requestedImage = image
       } else if requestedImage == nil, let image {
         requestedImage = image
       }
-      if !degraded {
+      if !degraded || cancelled {
         semaphore.signal()
       }
     }
@@ -2800,6 +2815,11 @@ private final class IOSNsfwScanner {
 
     if let requestError {
       throw requestError
+    }
+    if wasCancelled, requestedImage == nil {
+      throw ScannerError.invalidArgument(
+        "Unable to fetch image for asset \(asset.localIdentifier): request cancelled"
+      )
     }
     if let requestedImage {
       return requestedImage
@@ -2818,10 +2838,14 @@ private final class IOSNsfwScanner {
     let semaphore = DispatchSemaphore(value: 0)
     var resolvedData: Data?
     var requestError: Error?
+    var isInCloud = false
 
     PHImageManager.default().requestImageDataAndOrientation(for: asset, options: requestOptions) { data, _, _, info in
       if let error = info?[PHImageErrorKey] as? Error {
         requestError = error
+      }
+      if (info?[PHImageResultIsInCloudKey] as? Bool) == true {
+        isInCloud = true
       }
       resolvedData = data
       semaphore.signal()
@@ -2831,24 +2855,123 @@ private final class IOSNsfwScanner {
     if let requestError {
       throw requestError
     }
+    if (resolvedData == nil || resolvedData?.isEmpty == true), isInCloud {
+      throw ScannerError.invalidArgument(
+        "Unable to read image data for asset \(asset.localIdentifier): iCloud asset not yet materialized"
+      )
+    }
     return resolvedData
   }
 
   private func resolveImageAssetPath(asset: PHAsset) throws -> String {
-    guard let data = try requestImageData(for: asset), !data.isEmpty else {
-      throw ScannerError.invalidArgument(
-        "Unable to read image data for asset \(asset.localIdentifier)"
-      )
+    if let directPath = try resolveImageAssetPathUsingImageData(asset: asset) {
+      return directPath
     }
-    let outDir = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "asset_cache",
-      isDirectory: true
+    if let resourcePath = try resolveImageAssetPathUsingResourceDownload(asset: asset) {
+      return resourcePath
+    }
+    if let renderedPath = try resolveImageAssetPathUsingRenderedImage(asset: asset) {
+      return renderedPath
+    }
+    throw ScannerError.invalidArgument(
+      "Unable to read image data for asset \(asset.localIdentifier). The asset may be unavailable, cloud-only, or restricted."
     )
-    try FileManager.default.createDirectory(
-      at: outDir,
-      withIntermediateDirectories: true
+  }
+
+  private func resolveImageAssetPathUsingImageData(asset: PHAsset) throws -> String? {
+    guard let data = try requestImageData(for: asset), !data.isEmpty else {
+      return nil
+    }
+    return try writeAssetDataToTemp(data: data, preferredExtension: "jpg")
+  }
+
+  private func resolveImageAssetPathUsingResourceDownload(asset: PHAsset) throws -> String? {
+    let resources = PHAssetResource.assetResources(for: asset)
+    guard let resource = resources.first(where: { $0.type == .photo || $0.type == .fullSizePhoto }) ?? resources.first else {
+      return nil
+    }
+
+    let options = PHAssetResourceRequestOptions()
+    options.isNetworkAccessAllowed = true
+
+    let semaphore = DispatchSemaphore(value: 0)
+    var collectedData = Data()
+    PHAssetResourceManager.default().requestData(
+      for: resource,
+      options: options,
+      dataReceivedHandler: { chunk in
+        collectedData.append(chunk)
+      },
+      completionHandler: { _ in
+        semaphore.signal()
+      }
     )
-    let out = outDir.appendingPathComponent("asset_\(UUID().uuidString).jpg")
+    semaphore.wait()
+
+    guard !collectedData.isEmpty else {
+      return nil
+    }
+
+    let ext = (resource.originalFilename as NSString).pathExtension
+    return try writeAssetDataToTemp(
+      data: collectedData,
+      preferredExtension: ext.isEmpty ? "jpg" : ext
+    )
+  }
+
+  private func resolveImageAssetPathUsingRenderedImage(asset: PHAsset) throws -> String? {
+    let options = PHImageRequestOptions()
+    options.deliveryMode = .highQualityFormat
+    options.resizeMode = .exact
+    options.isSynchronous = false
+    options.isNetworkAccessAllowed = true
+    options.version = .current
+
+    let targetWidth = max(64, min(asset.pixelWidth, 4096))
+    let targetHeight = max(64, min(asset.pixelHeight, 4096))
+
+    let semaphore = DispatchSemaphore(value: 0)
+    var requestedImage: UIImage?
+    var wasCancelled = false
+
+    PHImageManager.default().requestImage(
+      for: asset,
+      targetSize: CGSize(width: targetWidth, height: targetHeight),
+      contentMode: .aspectFit,
+      options: options
+    ) { image, info in
+      let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+      let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+      if cancelled {
+        wasCancelled = true
+      }
+      if let image, !degraded {
+        requestedImage = image
+      } else if requestedImage == nil, let image {
+        requestedImage = image
+      }
+      if !degraded || cancelled {
+        semaphore.signal()
+      }
+    }
+    semaphore.wait()
+
+    if wasCancelled, requestedImage == nil {
+      return nil
+    }
+    guard let image = requestedImage,
+          let data = image.jpegData(compressionQuality: 1.0),
+          !data.isEmpty else {
+      return nil
+    }
+    return try writeAssetDataToTemp(data: data, preferredExtension: "jpg")
+  }
+
+  private func writeAssetDataToTemp(data: Data, preferredExtension: String) throws -> String {
+    let outDir = try ensureCacheDirectory(named: "asset_cache")
+    let normalizedExt = preferredExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+    let ext = normalizedExt.isEmpty ? "jpg" : normalizedExt
+    let out = outDir.appendingPathComponent("asset_\(UUID().uuidString).\(ext)")
     try data.write(to: out, options: .atomic)
     return out.path
   }

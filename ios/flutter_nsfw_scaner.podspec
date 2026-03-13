@@ -4,7 +4,7 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'flutter_nsfw_scaner'
-  s.version          = '1.1.0'
+  s.version          = '1.1.1'
   s.summary          = 'NSFW image scanning with TensorFlow Lite.'
   s.description      = <<-DESC
 NSFW image scanning with TensorFlow Lite.
