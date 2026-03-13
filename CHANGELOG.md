@@ -1,3 +1,10 @@
+## 1.1.0
+
+- Added robust large-scan defaults across multi-asset flows: adaptive chunk sizing/backpressure is now applied in Dart for `scanMediaInChunks` and `scanMultipleMedia`.
+- Added multi-pass retry for asset reference resolution in `scanMultipleMedia` to better recover temporarily unavailable cloud assets before emitting final errors.
+- Added native gallery range handling (`pageSize`, `startPage`, `maxPages`) for both iOS and Android `scanGallery`, so large gallery scans can run in bounded windows instead of always starting from the full dataset.
+- Kept whole-gallery cloud fallback behavior in place (retry queue + final fallback paths), now with range-scoped scanning support.
+
 ## 1.0.14
 
 - Extended iOS whole-gallery retry handling for cloud/unavailable assets with configurable retry phase defaults (`retryPasses=2`, `retryDelayMs=1400`), so assets can be retried after background materialization.

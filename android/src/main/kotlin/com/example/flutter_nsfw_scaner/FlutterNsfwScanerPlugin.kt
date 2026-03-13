@@ -1806,6 +1806,9 @@ private class AndroidNsfwScanner(
             val videoEarlyStopVeryLongBonusFrames =
                 (settings["videoEarlyStopVeryLongBonusFrames"] as? Number)?.toInt() ?: 3
             val continueOnError = (settings["continueOnError"] as? Boolean) ?: true
+            val pageSize = ((settings["pageSize"] as? Number)?.toInt() ?: 200).coerceIn(20, 2000)
+            val startPage = ((settings["startPage"] as? Number)?.toInt() ?: 0).coerceAtLeast(0)
+            val maxPages = (settings["maxPages"] as? Number)?.toInt()?.takeIf { it > 0 }
             val scanBatchSize = ((settings["scanChunkSize"] as? Number)?.toInt() ?: 100).coerceIn(50, 200)
             val thumbnailSize = ((settings["thumbnailSize"] as? Number)?.toInt() ?: 224).coerceIn(128, 512)
             val loadProgressEvery = ((settings["loadProgressEvery"] as? Number)?.toInt() ?: 100).coerceIn(20, 500)
@@ -1856,7 +1859,16 @@ private class AndroidNsfwScanner(
 
             resolver.query(queryUri, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
                 val totalDiscovered = cursor.count.coerceAtLeast(0)
-                val totalTarget = maxItems?.let { minOf(it, totalDiscovered) } ?: totalDiscovered
+                val startIndex = (startPage * pageSize).coerceIn(0, totalDiscovered)
+                val availableFromStart = (totalDiscovered - startIndex).coerceAtLeast(0)
+                val rangeWindow = maxPages?.let { pages ->
+                    val requested = (pages.toLong() * pageSize.toLong())
+                        .coerceAtLeast(0L)
+                        .coerceAtMost(Int.MAX_VALUE.toLong())
+                        .toInt()
+                    minOf(availableFromStart, requested)
+                } ?: availableFromStart
+                val totalTarget = maxItems?.let { minOf(it, rangeWindow) } ?: rangeWindow
 
                 onEvent(
                     buildGalleryLoadPayload(
@@ -1927,6 +1939,40 @@ private class AndroidNsfwScanner(
                 var errorTotal = 0
                 var flaggedTotal = 0
                 var page = 0
+
+                if (startIndex > 0) {
+                    if (!cursor.moveToPosition(startIndex - 1)) {
+                        onEvent(
+                            buildGalleryLoadPayload(
+                                scanId = scanId,
+                                page = 0,
+                                scannedAssets = 0,
+                                imageCount = 0,
+                                videoCount = 0,
+                                targetCount = 0,
+                                isCompleted = true,
+                            ),
+                        )
+                        onEvent(
+                            buildGalleryScanProgressPayload(
+                                scanId = scanId,
+                                processed = 0,
+                                total = 0,
+                                imagePath = null,
+                                error = null,
+                                status = "completed",
+                                mediaType = null,
+                            ),
+                        )
+                        return@withContext linkedMapOf(
+                            "items" to emptyList<Map<String, Any?>>(),
+                            "processed" to 0,
+                            "successCount" to 0,
+                            "errorCount" to 0,
+                            "flaggedCount" to 0,
+                        )
+                    }
+                }
 
                 suspend fun flushBatch() {
                     if (pendingBatch.isEmpty()) {
@@ -2009,7 +2055,7 @@ private class AndroidNsfwScanner(
                     if (isCancelled()) {
                         throw CancellationException("Scan cancelled")
                     }
-                    if (processedTotal + pendingBatch.size >= totalTarget) {
+                    if (scannedAssets >= totalTarget) {
                         break
                     }
                     val id = cursor.getLong(idIndex)

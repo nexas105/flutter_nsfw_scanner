@@ -390,7 +390,13 @@ class FlutterNsfwScaner {
       );
     }
 
-    final safeChunkSize = chunkSize.clamp(8, 500);
+    final safeChunkSize = _resolveAdaptiveChunkSize(
+      requestedChunkSize: chunkSize,
+      totalItems: media.length,
+      maxConcurrency: settings.maxConcurrency,
+      minChunkSize: 8,
+      maxChunkSize: 500,
+    );
     final totalItems = media.length;
     final chunkCount = (totalItems / safeChunkSize).ceil();
 
@@ -945,6 +951,8 @@ class FlutterNsfwScaner {
     int resolveConcurrency = 6,
     bool includeOriginFileFallback = false,
     bool attemptExpandLimitedAccess = true,
+    int retryPasses = 2,
+    int retryDelayMs = 1400,
     int loadProgressEvery = 24,
     bool debugLogging = false,
     void Function(NsfwGalleryLoadProgress progress)? onLoadProgress,
@@ -1044,6 +1052,8 @@ class FlutterNsfwScaner {
         'includeCleanResults': includeCleanResults,
         'resolveConcurrency': resolveConcurrency,
         'includeOriginFileFallback': includeOriginFileFallback,
+        'retryPasses': retryPasses,
+        'retryDelayMs': retryDelayMs,
         'loadProgressEvery': loadProgressEvery,
         'debugLogging': debugLogging,
         'imageThreshold': settings.imageThreshold,
@@ -1132,6 +1142,8 @@ class FlutterNsfwScaner {
     int resolveConcurrency = 4,
     bool includeCleanResults = false,
     bool attemptExpandLimitedAccess = true,
+    int retryPasses = 2,
+    int retryDelayMs = 1400,
     int loadProgressEvery = 20,
     bool debugLogging = false,
     void Function(NsfwGalleryLoadProgress progress)? onLoadProgress,
@@ -1147,6 +1159,8 @@ class FlutterNsfwScaner {
       resolveConcurrency: resolveConcurrency,
       includeCleanResults: includeCleanResults,
       attemptExpandLimitedAccess: attemptExpandLimitedAccess,
+      retryPasses: retryPasses,
+      retryDelayMs: retryDelayMs,
       loadProgressEvery: loadProgressEvery,
       debugLogging: debugLogging,
       onLoadProgress: onLoadProgress,
@@ -1369,6 +1383,8 @@ class FlutterNsfwScaner {
         assetRefs,
         resolveConcurrency: resolveConcurrency,
         includeOriginFileFallback: includeOriginFileFallback,
+        retryPasses: 3,
+        retryDelayMs: 1200,
       );
       media.addAll(
         resolvedOutcomes
@@ -1399,10 +1415,18 @@ class FlutterNsfwScaner {
       );
     }
 
+    final effectiveChunkSize = _resolveAdaptiveChunkSize(
+      requestedChunkSize: chunkSize,
+      totalItems: media.length,
+      maxConcurrency: settings.maxConcurrency,
+      minChunkSize: 8,
+      maxChunkSize: 500,
+    );
+
     final scanned = await scanMediaInChunks(
       media: media,
       settings: settings,
-      chunkSize: chunkSize,
+      chunkSize: effectiveChunkSize,
       includeCleanResults: includeCleanResults,
       onProgress: onProgress,
       onChunkResult: onChunkResult,
@@ -1492,45 +1516,130 @@ class FlutterNsfwScaner {
     List<NsfwAssetRef> refs, {
     required int resolveConcurrency,
     required bool includeOriginFileFallback,
+    int retryPasses = 2,
+    int retryDelayMs = 1100,
   }) async {
     if (refs.isEmpty) {
       return const [];
     }
-    final safeConcurrency = resolveConcurrency.clamp(1, 12);
-    final outcomes = <_AssetResolveOutcome>[];
-    var cursor = 0;
-    while (cursor < refs.length) {
-      final end = math.min(cursor + safeConcurrency, refs.length);
-      final chunk = refs.sublist(cursor, end);
-      final chunkResults = await Future.wait(
-        chunk.map((ref) async {
-          try {
-            final loaded = await loadAsset(
-              assetId: ref.id,
-              allowImages: ref.isImage,
-              allowVideos: ref.isVideo,
-              includeOriginFileFallback: includeOriginFileFallback,
-            );
-            if (loaded == null) {
+    final totalRefs = refs.length;
+    final safeConcurrency = _resolveAdaptiveChunkSize(
+      requestedChunkSize: resolveConcurrency,
+      totalItems: totalRefs,
+      maxConcurrency: resolveConcurrency,
+      minChunkSize: 1,
+      maxChunkSize: 8,
+    );
+    final normalizedRetryPasses = retryPasses.clamp(1, 3);
+    var pending = List<NsfwAssetRef>.from(refs);
+    final resolvedOutcomes = <_AssetResolveOutcome>[];
+    var pass = 1;
+
+    while (pending.isNotEmpty && pass <= normalizedRetryPasses) {
+      final nextPending = <NsfwAssetRef>[];
+      var cursor = 0;
+      while (cursor < pending.length) {
+        final end = math.min(cursor + safeConcurrency, pending.length);
+        final chunk = pending.sublist(cursor, end);
+        final chunkResults = await Future.wait(
+          chunk.map((ref) async {
+            try {
+              final loaded = await loadAsset(
+                assetId: ref.id,
+                allowImages: ref.isImage,
+                allowVideos: ref.isVideo,
+                includeOriginFileFallback: includeOriginFileFallback,
+              );
+              if (loaded == null) {
+                return _AssetResolveOutcome(
+                  ref: ref,
+                  error: 'Asset konnte nicht aufgelost werden.',
+                );
+              }
+              return _AssetResolveOutcome(ref: ref, loaded: loaded);
+            } catch (error) {
               return _AssetResolveOutcome(
                 ref: ref,
-                error: 'Asset konnte nicht aufgelost werden.',
+                error: 'Asset-Auflosung fehlgeschlagen: $error',
               );
             }
-            return _AssetResolveOutcome(ref: ref, loaded: loaded);
-          } catch (error) {
-            return _AssetResolveOutcome(
-              ref: ref,
-              error: 'Asset-Auflosung fehlgeschlagen: $error',
-            );
+          }),
+        );
+        for (final outcome in chunkResults) {
+          if (outcome.loaded != null) {
+            resolvedOutcomes.add(outcome);
+            continue;
           }
-        }),
-      );
-      outcomes.addAll(chunkResults);
-      cursor = end;
-      await Future<void>.delayed(Duration.zero);
+          final message = (outcome.error ?? '').toLowerCase();
+          final isRetryable =
+              pass < normalizedRetryPasses &&
+              (message.contains('3164') ||
+                  message.contains('phphotoserrordomain') ||
+                  message.contains('icloud') ||
+                  message.contains('cloud') ||
+                  message.contains('network') ||
+                  message.contains('tempor') ||
+                  message.contains('not available') ||
+                  message.contains('resource'));
+          if (isRetryable) {
+            nextPending.add(outcome.ref);
+          } else {
+            resolvedOutcomes.add(outcome);
+          }
+        }
+        cursor = end;
+        await Future<void>.delayed(Duration.zero);
+      }
+      if (nextPending.isEmpty) {
+        pending = const [];
+        break;
+      }
+      if (retryDelayMs > 0) {
+        await Future<void>.delayed(Duration(milliseconds: retryDelayMs));
+      }
+      pending = nextPending;
+      pass += 1;
     }
-    return outcomes;
+
+    if (pending.isNotEmpty) {
+      resolvedOutcomes.addAll(
+        pending.map(
+          (ref) => _AssetResolveOutcome(
+            ref: ref,
+            error:
+                'Asset-Auflosung fehlgeschlagen: nach mehreren Versuchen weiterhin nicht verfugbar.',
+          ),
+        ),
+      );
+    }
+    return resolvedOutcomes;
+  }
+
+  int _resolveAdaptiveChunkSize({
+    required int requestedChunkSize,
+    required int totalItems,
+    required int maxConcurrency,
+    required int minChunkSize,
+    required int maxChunkSize,
+  }) {
+    final boundedMin = math.max(1, minChunkSize);
+    final boundedMax = math.max(boundedMin, maxChunkSize);
+    var resolved = requestedChunkSize.clamp(boundedMin, boundedMax);
+    final safeConcurrency = maxConcurrency.clamp(1, 12);
+    final minByConcurrency = (safeConcurrency * 3).clamp(boundedMin, boundedMax);
+    if (resolved < minByConcurrency) {
+      resolved = minByConcurrency;
+    }
+    if (totalItems >= 6000) {
+      resolved = math.min(resolved, 24);
+    } else if (totalItems >= 2500) {
+      resolved = math.min(resolved, 36);
+    } else if (totalItems >= 1200) {
+      resolved = math.min(resolved, 52);
+    } else if (totalItems >= 600) {
+      resolved = math.min(resolved, 72);
+    }
+    return resolved.clamp(boundedMin, boundedMax);
   }
 
   Future<_DownloadedMedia> _downloadMediaFromUrl({

@@ -1872,6 +1872,10 @@ private final class IOSNsfwScanner {
       (settings["videoEarlyStopVeryLongBonusFrames"] as? NSNumber)?.intValue ?? 3
     let continueOnError = (settings["continueOnError"] as? Bool) ?? true
     let preferThumbnailForImages = (settings["preferThumbnailForImages"] as? Bool) ?? true
+    let pageSize = ((settings["pageSize"] as? NSNumber)?.intValue ?? 200).clamped(to: 20...2000)
+    let startPage = max(0, (settings["startPage"] as? NSNumber)?.intValue ?? 0)
+    let maxPagesRaw = (settings["maxPages"] as? NSNumber)?.intValue
+    let maxPages = (maxPagesRaw ?? 0) > 0 ? maxPagesRaw! : nil
     let scanBatchSize = ((settings["scanChunkSize"] as? NSNumber)?.intValue ?? 100).clamped(to: 50...200)
     let thumbnailSize = ((settings["thumbnailSize"] as? NSNumber)?.intValue ?? 224).clamped(to: 128...512)
     let retryPasses = ((settings["retryPasses"] as? NSNumber)?.intValue ?? 2).clamped(to: 1...3)
@@ -1903,7 +1907,21 @@ private final class IOSNsfwScanner {
 
     let assets = PHAsset.fetchAssets(with: fetchOptions)
     let totalDiscovered = assets.count
-    let totalTarget = min(totalDiscovered, maxItems ?? totalDiscovered)
+    let safeStartProduct = Int64(startPage) * Int64(pageSize)
+    let startIndex = min(
+      totalDiscovered,
+      max(0, Int(min(Int64(totalDiscovered), max(0, safeStartProduct))))
+    )
+    let availableFromStart = max(0, totalDiscovered - startIndex)
+    let rangeWindow: Int
+    if let maxPages {
+      let safeRangeProduct = Int64(maxPages) * Int64(pageSize)
+      let requestedRange = max(0, Int(min(Int64(Int.max), safeRangeProduct)))
+      rangeWindow = min(availableFromStart, requestedRange)
+    } else {
+      rangeWindow = availableFromStart
+    }
+    let totalTarget = min(rangeWindow, maxItems ?? rangeWindow)
 
     onEvent(
       buildGalleryLoadPayload(
@@ -2058,8 +2076,8 @@ private final class IOSNsfwScanner {
       applyOutcome(outcome)
     }
 
-    var index = 0
-    while index < totalTarget {
+    var index = startIndex
+    while scannedAssets < totalTarget && index < totalDiscovered {
       if isCancelled() {
         throw ScannerError.cancelled("Scan cancelled")
       }
