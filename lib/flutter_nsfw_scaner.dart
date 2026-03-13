@@ -44,7 +44,7 @@ class FlutterNsfwScaner {
   late final String _autoHaramiDeviceFolder;
   final LinkedHashMap<String, AssetEntity> _assetEntityCache =
       LinkedHashMap<String, AssetEntity>();
-  static const int _assetEntityCacheMaxEntries = 4000;
+  static const int _assetEntityCacheMaxEntries = 12000;
 
   int _scanCounter = 0;
 
