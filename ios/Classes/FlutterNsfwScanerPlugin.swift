@@ -3630,18 +3630,41 @@ private final class IOSNsfwScanner {
       }
     }
 
-    let keys = ["duration"]
+    let keys = ["duration", "tracks"]
     let semaphore = DispatchSemaphore(value: 0)
     asset.loadValuesAsynchronously(forKeys: keys) {
       semaphore.signal()
     }
-    let waitResult = semaphore.wait(timeout: .now() + 0.2)
+    let waitResult = semaphore.wait(timeout: .now() + 2.5)
     if waitResult == .timedOut {
+      if let videoTrack = asset.tracks(withMediaType: .video).first {
+        let trackDuration = CMTimeGetSeconds(videoTrack.timeRange.duration)
+        if trackDuration.isFinite && trackDuration > 0 {
+          if let cacheKey {
+            videoDurationCacheLock.lock()
+            videoDurationCache[cacheKey] = trackDuration
+            videoDurationCacheLock.unlock()
+          }
+          return trackDuration
+        }
+      }
       return nil
     }
 
-    let status = asset.statusOfValue(forKey: "duration", error: nil)
-    guard status == .loaded else {
+    var durationStatusError: NSError?
+    let durationStatus = asset.statusOfValue(forKey: "duration", error: &durationStatusError)
+    if durationStatus != .loaded {
+      if let videoTrack = asset.tracks(withMediaType: .video).first {
+        let trackDuration = CMTimeGetSeconds(videoTrack.timeRange.duration)
+        if trackDuration.isFinite && trackDuration > 0 {
+          if let cacheKey {
+            videoDurationCacheLock.lock()
+            videoDurationCache[cacheKey] = trackDuration
+            videoDurationCacheLock.unlock()
+          }
+          return trackDuration
+        }
+      }
       return nil
     }
 
