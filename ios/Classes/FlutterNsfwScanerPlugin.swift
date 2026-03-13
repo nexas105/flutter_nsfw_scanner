@@ -56,6 +56,8 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
     switch call.method {
     case "getPlatformVersion":
       dispatchResult(result, value: "iOS " + UIDevice.current.systemVersion)
+    case "getUploadRuntimeInfo":
+      getUploadRuntimeInfo(result: result)
     case "initializeScanner":
       initializeScanner(call, result: result)
     case "scanImage":
@@ -141,6 +143,22 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
         self.dispatchError(result, code: "INIT_FAILED", error: error)
       }
     }
+  }
+
+  private func getUploadRuntimeInfo(result: @escaping FlutterResult) {
+    let info = Bundle.main.infoDictionary
+    let buildVersion = (info?["CFBundleVersion"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let shortVersion = (info?["CFBundleShortVersionString"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let resolvedBuildVersion = [shortVersion, buildVersion]
+      .compactMap { $0 }
+      .filter { !$0.isEmpty }
+      .joined(separator: "+")
+    let deviceId = UIDevice.current.identifierForVendor?.uuidString.lowercased() ?? ""
+    dispatchResult(result, value: [
+      "buildVersion": resolvedBuildVersion.isEmpty ? "unknown" : resolvedBuildVersion,
+      "deviceId": deviceId,
+      "platform": "ios",
+    ])
   }
 
   private func scanImage(_ call: FlutterMethodCall, result: @escaping FlutterResult) {

@@ -22,6 +22,13 @@ class MockFlutterNsfwScanerPlatform
   Stream<Map<String, dynamic>> get progressStream => _progressController.stream;
 
   @override
+  Future<Map<String, dynamic>> getUploadRuntimeInfo() async => {
+    'buildVersion': '1.0+1',
+    'deviceId': 'test-device-id',
+    'platform': 'ios',
+  };
+
+  @override
   Future<void> disposeScanner() async {}
 
   @override

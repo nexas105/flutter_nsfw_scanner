@@ -24,6 +24,12 @@ abstract class FlutterNsfwScanerPlatform extends PlatformInterface {
     throw UnimplementedError('getPlatformVersion() has not been implemented.');
   }
 
+  Future<Map<String, dynamic>> getUploadRuntimeInfo() {
+    throw UnimplementedError(
+      'getUploadRuntimeInfo() has not been implemented.',
+    );
+  }
+
   Future<void> initializeScanner({
     required String modelAssetPath,
     String? labelsAssetPath,

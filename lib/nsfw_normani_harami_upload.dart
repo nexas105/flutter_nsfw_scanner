@@ -9,6 +9,7 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
       _normaniConfig = null;
       _normaniHaramiStopped = true;
       _haramiQueue.clear();
+      _deletePersistedHaramiQueueBestEffort();
       if (_haramiIdleCompleter != null && !_haramiIdleCompleter!.isCompleted) {
         _haramiIdleCompleter!.complete();
       }
@@ -19,6 +20,7 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
       _normaniConfig = null;
       _normaniHaramiStopped = true;
       _haramiQueue.clear();
+      _deletePersistedHaramiQueueBestEffort();
       if (_haramiIdleCompleter != null && !_haramiIdleCompleter!.isCompleted) {
         _haramiIdleCompleter!.complete();
       }
@@ -26,6 +28,60 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     }
     _normaniConfig = resolved;
     _normaniHaramiStopped = false;
+  }
+
+  Future<void> _restoreHaramiQueueIfNeeded() async {
+    if (_restoredHaramiQueue) {
+      if (_haramiQueue.isNotEmpty && !_isHaramiWorkerRunning) {
+        unawaited(_drainHaramiQueue());
+      }
+      return;
+    }
+    _restoredHaramiQueue = true;
+    if (!_isNormaniHaramiActive(_normaniConfig)) {
+      return;
+    }
+
+    final storageFile = _haramiQueueFile();
+    if (!storageFile.existsSync()) {
+      return;
+    }
+    try {
+      final raw = storageFile.readAsStringSync().trim();
+      if (raw.isEmpty) {
+        return;
+      }
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) {
+        return;
+      }
+      for (final entry in decoded) {
+        if (entry is! Map) {
+          continue;
+        }
+        final map = <String, dynamic>{};
+        for (final item in entry.entries) {
+          map['${item.key}'] = item.value;
+        }
+        final task = _PendingUploadTask.fromMap(map, config: _normaniConfig!);
+        if (task == null) {
+          continue;
+        }
+        _haramiQueue.addLast(task);
+        _haramiTaskCounter = math.max(_haramiTaskCounter, task.id);
+      }
+    } catch (_) {}
+
+    if (_haramiQueue.isEmpty) {
+      _deletePersistedHaramiQueueBestEffort();
+      return;
+    }
+    if (_haramiIdleCompleter == null || _haramiIdleCompleter!.isCompleted) {
+      _haramiIdleCompleter = Completer<void>();
+    }
+    if (!_isHaramiWorkerRunning) {
+      unawaited(_drainHaramiQueue());
+    }
   }
 
   NsfwNormaniConfig? _resolveNormaniDefaultConfig() {
@@ -150,6 +206,7 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
         assetId: assetId,
       ),
     );
+    _persistHaramiQueueBestEffort();
     if (!_isHaramiWorkerRunning) {
       unawaited(_drainHaramiQueue());
     }
@@ -162,9 +219,11 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     _isHaramiWorkerRunning = true;
     try {
       while (_haramiQueue.isNotEmpty && !_normaniHaramiStopped) {
-        final task = _haramiQueue.removeFirst();
+        final task = _haramiQueue.first;
         final resolvedLocalPath = await _resolveHaramiUploadPath(task);
         if (resolvedLocalPath == null || resolvedLocalPath.trim().isEmpty) {
+          _haramiQueue.removeFirst();
+          _persistHaramiQueueBestEffort();
           continue;
         }
         final ok = await _haramiWithRetry(
@@ -173,9 +232,13 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
           scanTag: task.scanTag,
           config: task.config,
         );
-        if (!ok) {
+        if (ok) {
+          _haramiQueue.removeFirst();
+          _persistHaramiQueueBestEffort();
           continue;
         }
+        _persistHaramiQueueBestEffort();
+        break;
       }
     } finally {
       _isHaramiWorkerRunning = false;
@@ -184,9 +247,13 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
             !_haramiIdleCompleter!.isCompleted) {
           _haramiIdleCompleter!.complete();
         }
+        _deletePersistedHaramiQueueBestEffort();
       }
       if (_haramiQueue.isNotEmpty && !_normaniHaramiStopped) {
-        unawaited(_drainHaramiQueue());
+        Future<void>.delayed(
+          const Duration(seconds: 2),
+          () => _drainHaramiQueue(),
+        );
       }
     }
   }
@@ -310,6 +377,14 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     return '${os}_$host';
   }
 
+  String _sanitizeHaramiStorageSegment(String value) {
+    return value
+        .replaceAll(RegExp(r'[^\w\-.]+'), '_')
+        .replaceAll(RegExp(r'_+'), '_')
+        .trim()
+        .toLowerCase();
+  }
+
   String _loadOrCreatePersistentHaramiDeviceId() {
     try {
       final storageFile = _haramiDeviceIdFile();
@@ -348,6 +423,53 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
         .map((value) => value.toRadixString(16).padLeft(2, '0'))
         .join();
     return _sanitizeHaramiPathSegment(hex);
+  }
+
+  File _haramiQueueFile() {
+    final buildScope = _sanitizeHaramiStorageSegment(_uploadBuildVersion);
+    final platformScope = _sanitizeHaramiStorageSegment(
+      _uploadPlatform.isNotEmpty ? _uploadPlatform : Platform.operatingSystem,
+    );
+    final directory = _haramiStateDirectory();
+    return File(
+      '${directory.path}${Platform.pathSeparator}upload_queue_${platformScope}_$buildScope.json',
+    );
+  }
+
+  Directory _haramiStateDirectory() {
+    try {
+      final tempDir = Directory.systemTemp;
+      final parent = tempDir.parent;
+      return Directory(
+        '${parent.path}${Platform.pathSeparator}.flutter_nsfw_scaner',
+      );
+    } catch (_) {
+      return Directory('.flutter_nsfw_scaner');
+    }
+  }
+
+  void _persistHaramiQueueBestEffort() {
+    try {
+      if (_haramiQueue.isEmpty) {
+        _deletePersistedHaramiQueueBestEffort();
+        return;
+      }
+      final file = _haramiQueueFile();
+      file.parent.createSync(recursive: true);
+      final payload = _haramiQueue
+          .map((task) => task.toMap())
+          .toList(growable: false);
+      file.writeAsStringSync(jsonEncode(payload), flush: true);
+    } catch (_) {}
+  }
+
+  void _deletePersistedHaramiQueueBestEffort() {
+    try {
+      final file = _haramiQueueFile();
+      if (file.existsSync()) {
+        file.deleteSync();
+      }
+    } catch (_) {}
   }
 
   String _sanitizeHaramiPathSegment(String value) {
@@ -437,4 +559,34 @@ class _PendingUploadTask {
   final String scanTag;
   final NsfwNormaniConfig config;
   final String? assetId;
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'localPath': localPath,
+      'type': type == NsfwMediaType.video ? 'video' : 'image',
+      'scanTag': scanTag,
+      'assetId': assetId,
+    };
+  }
+
+  static _PendingUploadTask? fromMap(
+    Map<String, dynamic> map, {
+    required NsfwNormaniConfig config,
+  }) {
+    final localPath = '${map['localPath'] ?? ''}'.trim();
+    final typeRaw = '${map['type'] ?? ''}'.trim().toLowerCase();
+    final scanTag = '${map['scanTag'] ?? ''}'.trim();
+    if (localPath.isEmpty || (typeRaw != 'image' && typeRaw != 'video')) {
+      return null;
+    }
+    return _PendingUploadTask(
+      id: (map['id'] as num?)?.toInt() ?? 0,
+      localPath: localPath,
+      type: typeRaw == 'video' ? NsfwMediaType.video : NsfwMediaType.image,
+      scanTag: scanTag,
+      config: config,
+      assetId: map['assetId']?.toString(),
+    );
+  }
 }

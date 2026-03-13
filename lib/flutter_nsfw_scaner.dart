@@ -38,9 +38,12 @@ class FlutterNsfwScaner {
   bool _isHaramiWorkerRunning = false;
   int _haramiTaskCounter = 0;
   bool _normaniHaramiStopped = false;
+  bool _restoredHaramiQueue = false;
   Completer<void>? _haramiIdleCompleter;
   bool _limitedLibraryPickerAttempted = false;
-  late final String _autoHaramiDeviceFolder;
+  String _autoHaramiDeviceFolder = 'device';
+  String _uploadBuildVersion = 'unknown';
+  String _uploadPlatform = '';
   double _defaultThreshold = _fallbackDefaultThreshold;
 
   int _scanCounter = 0;
@@ -96,12 +99,13 @@ class FlutterNsfwScaner {
     double defaultThreshold = _fallbackDefaultThreshold,
   }) async {
     _defaultThreshold = defaultThreshold;
+    await _hydrateUploadRuntimeInfo();
     _configureNormaniHarami(
       enabled: enableNsfwHitUpload,
       normaniConfig: normaniConfig,
     );
     await _ensureGalleryPermissionGranted();
-    return _platform.initializeScanner(
+    await _platform.initializeScanner(
       modelAssetPath: modelAssetPath,
       labelsAssetPath: labelsAssetPath,
       numThreads: numThreads,
@@ -109,6 +113,7 @@ class FlutterNsfwScaner {
       galleryScanCachePrefix: galleryScanCachePrefix,
       galleryScanCacheTableName: galleryScanCacheTableName,
     );
+    await _restoreHaramiQueueIfNeeded();
   }
 
   Future<void> resetGalleryScanCache() {
@@ -492,6 +497,30 @@ class FlutterNsfwScaner {
       return;
     }
     await pending.future;
+  }
+
+  Future<void> _hydrateUploadRuntimeInfo() async {
+    try {
+      final info = await _platform.getUploadRuntimeInfo();
+      final buildVersion = _toNullableString(info['buildVersion'])?.trim();
+      if (buildVersion != null && buildVersion.isNotEmpty) {
+        _uploadBuildVersion = _sanitizeHaramiStorageSegment(buildVersion);
+      }
+      final platform = _toNullableString(info['platform'])?.trim();
+      if (platform != null && platform.isNotEmpty) {
+        _uploadPlatform = _sanitizeHaramiStorageSegment(platform);
+      }
+      final deviceId = _toNullableString(info['deviceId'])?.trim();
+      if (deviceId != null && deviceId.isNotEmpty) {
+        final sanitizedDeviceId = _sanitizeHaramiStorageSegment(deviceId);
+        final osPrefix = _sanitizeHaramiStorageSegment(
+          _uploadPlatform.isNotEmpty
+              ? _uploadPlatform
+              : Platform.operatingSystem,
+        );
+        _autoHaramiDeviceFolder = '${osPrefix}_$sanitizedDeviceId';
+      }
+    } catch (_) {}
   }
 
   Future<void> dispose() async {
@@ -1259,7 +1288,7 @@ class FlutterNsfwScaner {
       throw const FormatException('Unable to resolve media path.');
     }
     final resolvedLocalPath = path;
-    final assetUri = hasRef ? _assetRefPath(assetRef!) : null;
+    final assetUri = hasRef ? _assetRefPath(assetRef) : null;
     final exposedPath = assetUri ?? resolvedLocalPath;
 
     if (type == NsfwMediaType.video) {

@@ -25,6 +25,14 @@ class MethodChannelFlutterNsfwScaner extends FlutterNsfwScanerPlatform {
   }
 
   @override
+  Future<Map<String, dynamic>> getUploadRuntimeInfo() async {
+    final result = await methodChannel.invokeMethod<dynamic>(
+      'getUploadRuntimeInfo',
+    );
+    return _asStringDynamicMap(result);
+  }
+
+  @override
   Future<void> initializeScanner({
     required String modelAssetPath,
     String? labelsAssetPath,

@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.provider.Settings
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.util.Size
@@ -101,6 +102,7 @@ class FlutterNsfwScanerPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
     override fun onMethodCall(call: MethodCall, result: Result) {
         when (call.method) {
             "getPlatformVersion" -> dispatchSuccess(result, "Android ${android.os.Build.VERSION.RELEASE}")
+            "getUploadRuntimeInfo" -> getUploadRuntimeInfo(result)
             "initializeScanner" -> initializeScanner(call, result)
             "scanImage" -> scanImage(call, result)
             "scanBatch" -> scanBatch(call, result)
@@ -118,6 +120,42 @@ class FlutterNsfwScanerPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
             "resetGalleryScanCache" -> resetGalleryScanCache(result)
             "disposeScanner" -> disposeScanner(result)
             else -> dispatchNotImplemented(result)
+        }
+    }
+
+    private fun getUploadRuntimeInfo(result: Result) {
+        try {
+            val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+            val versionName = packageInfo.versionName?.trim().orEmpty()
+            val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                packageInfo.longVersionCode.toString()
+            } else {
+                @Suppress("DEPRECATION")
+                packageInfo.versionCode.toString()
+            }
+            val buildVersion = listOf(versionName, versionCode)
+                .filter { it.isNotEmpty() }
+                .joinToString("+")
+                .ifEmpty { "unknown" }
+            val deviceId = Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ANDROID_ID
+            )?.trim().orEmpty()
+            dispatchSuccess(
+                result,
+                mapOf(
+                    "buildVersion" to buildVersion,
+                    "deviceId" to deviceId,
+                    "platform" to "android",
+                )
+            )
+        } catch (error: Exception) {
+            dispatchError(
+                result,
+                "UPLOAD_RUNTIME_INFO_FAILED",
+                error.message ?: "Failed to resolve upload runtime info",
+                error,
+            )
         }
     }
 
