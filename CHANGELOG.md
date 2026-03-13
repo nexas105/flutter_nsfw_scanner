@@ -1,3 +1,46 @@
+## 1.0.14
+
+- Extended iOS whole-gallery retry handling for cloud/unavailable assets with configurable retry phase defaults (`retryPasses=2`, `retryDelayMs=1400`), so assets can be retried after background materialization.
+- Added iOS video last-resort fallback: when full video resolve/scan fails, scanner now attempts a thumbnail-frame scan for the same asset instead of returning an immediate item error.
+- Retry/defer behavior now consistently applies to both images and videos in whole-gallery mode.
+
+## 1.0.13
+
+- Improved iOS whole-gallery video scanning resilience: duration probing now uses async asset/track fallbacks and no longer hard-fails assets when duration is temporarily unavailable.
+- Added safe single-frame fallback scan (`t=0`) for cloud/mutated videos when duration cannot be resolved, reducing per-item video errors during large gallery scans.
+
+## 1.0.12
+
+- Added graceful handling for native `SCAN_CANCELLED` in Dart `scanMediaBatch`, returning controlled empty/partial-compatible batch payloads instead of throwing hard `PlatformException`.
+
+## 1.0.11
+
+- Handled native `SCAN_CANCELLED` in Dart `scanWholeGallery` as a graceful partial result instead of throwing a hard `PlatformException`.
+
+## 1.0.10
+
+- Improved iOS whole-gallery hit stability with thumbnail-first scanning and automatic full-asset fallback when thumbnail extraction/materialization fails.
+
+## 1.0.9
+
+- Fixed iOS compile error by adding missing `resolveImageAssetPath` and `resolveVideoAssetPath` implementations to `IOSNsfwScanner` used by whole-gallery fallback scanning.
+
+## 1.0.8
+
+- Improved iOS whole-gallery media materialization: if direct thumbnail/AVAsset access fails, scanner now falls back to local cached asset extraction before scan.
+- This aligns native whole-gallery behavior closer to `photo_manager`-style flows for cloud-backed assets.
+
+## 1.0.7
+
+- Fixed gallery auto-upload queue handling for iOS `ph://` assets by resolving to local file paths before upload.
+- Prevented a single failed auto-upload task from stopping the entire queue, improving whole-gallery stability and throughput.
+
+## 1.0.6
+
+- Fixed iOS native whole-gallery thumbnail scanning fallback so PhotoKit data-read failures no longer abort alternative image-request paths for existing assets.
+- Added an iOS native deferred retry pass for temporarily unavailable gallery assets: failed items are queued to the end and retried before final completion.
+- Added iOS media permission status API and limited-library expansion API (`getMediaPermissionStatus`, `presentLimitedLibraryPicker`) and wired optional limited-access expansion into `scanWholeGallery`/`scanGallery`.
+
 ## 1.0.5
 
 - Added `onChunkResult` callback support to `scanMultipleMedia(...)`, aligned with chunked scan workflows.

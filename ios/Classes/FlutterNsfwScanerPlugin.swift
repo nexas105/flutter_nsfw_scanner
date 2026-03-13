@@ -75,6 +75,10 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
       checkMediaPermission(result: result)
     case "requestMediaPermission":
       requestMediaPermission(result: result)
+    case "getMediaPermissionStatus":
+      getMediaPermissionStatus(result: result)
+    case "presentLimitedLibraryPicker":
+      presentLimitedLibraryPicker(result: result)
     case "resolveMediaAsset":
       resolveMediaAsset(call, result: result)
     case "listGalleryAssets":
@@ -549,6 +553,71 @@ public class FlutterNsfwScanerPlugin: NSObject, FlutterPlugin, FlutterStreamHand
     }
     let status = PHPhotoLibrary.authorizationStatus()
     dispatchResult(result, value: status == .authorized)
+  }
+
+  private func getMediaPermissionStatus(result: @escaping FlutterResult) {
+    if #available(iOS 14, *) {
+      let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+      dispatchResult(result, value: permissionStatusString(status))
+      return
+    }
+    let status = PHPhotoLibrary.authorizationStatus()
+    dispatchResult(result, value: permissionStatusStringLegacy(status))
+  }
+
+  private func presentLimitedLibraryPicker(result: @escaping FlutterResult) {
+    guard #available(iOS 14, *) else {
+      dispatchResult(result, value: false)
+      return
+    }
+    DispatchQueue.main.async {
+      let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+      guard status == .limited else {
+        self.dispatchResult(result, value: false)
+        return
+      }
+      guard let presentingViewController = self.topViewController() else {
+        self.dispatchResult(result, value: false)
+        return
+      }
+      PHPhotoLibrary.shared().presentLimitedLibraryPicker(from: presentingViewController)
+      self.dispatchResult(result, value: true)
+    }
+  }
+
+  @available(iOS 14, *)
+  private func permissionStatusString(_ status: PHAuthorizationStatus) -> String {
+    switch status {
+    case .authorized:
+      return "authorized"
+    case .limited:
+      return "limited"
+    case .denied:
+      return "denied"
+    case .restricted:
+      return "restricted"
+    case .notDetermined:
+      return "not_determined"
+    @unknown default:
+      return "unknown"
+    }
+  }
+
+  private func permissionStatusStringLegacy(_ status: PHAuthorizationStatus) -> String {
+    switch status {
+    case .authorized:
+      return "authorized"
+    case .denied:
+      return "denied"
+    case .restricted:
+      return "restricted"
+    case .notDetermined:
+      return "not_determined"
+    case .limited:
+      return "limited"
+    @unknown default:
+      return "unknown"
+    }
   }
 
   private func resolveMediaAsset(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -1326,43 +1395,50 @@ private final class IOSNsfwScanner {
     }
     let videoURL = URL(fileURLWithPath: videoPath)
     let asset = AVURLAsset(url: videoURL)
-    let durationSeconds = CMTimeGetSeconds(asset.duration)
-    guard durationSeconds.isFinite, durationSeconds > 0 else {
-      throw ScannerError.invalidArgument("Failed to read video duration: \(videoPath)")
-    }
+    let resolvedDurationSeconds = resolveVideoDurationSeconds(asset: asset)
 
     let effectiveSampleRate: Double
-    if dynamicSampleRate {
-      effectiveSampleRate = computeDynamicSampleRateFps(
+    let frameTimes: [Double]
+    let requiredNsfwFrames: Int
+    if let durationSeconds = resolvedDurationSeconds, durationSeconds > 0 {
+      if dynamicSampleRate {
+        effectiveSampleRate = computeDynamicSampleRateFps(
+          durationSeconds: durationSeconds,
+          shortVideoMinSampleRateFps: shortVideoMinSampleRateFps,
+          shortVideoMaxSampleRateFps: shortVideoMaxSampleRateFps,
+          mediumVideoMinutesThreshold: mediumVideoMinutesThreshold,
+          longVideoMinutesThreshold: longVideoMinutesThreshold,
+          mediumVideoSampleRateFps: mediumVideoSampleRateFps,
+          longVideoSampleRateFps: longVideoSampleRateFps
+        )
+      } else {
+        effectiveSampleRate = max(0.2, min(30, Double(sampleRateFps)))
+      }
+      frameTimes = buildVideoFrameTimes(
         durationSeconds: durationSeconds,
-        shortVideoMinSampleRateFps: shortVideoMinSampleRateFps,
-        shortVideoMaxSampleRateFps: shortVideoMaxSampleRateFps,
-        mediumVideoMinutesThreshold: mediumVideoMinutesThreshold,
-        longVideoMinutesThreshold: longVideoMinutesThreshold,
-        mediumVideoSampleRateFps: mediumVideoSampleRateFps,
-        longVideoSampleRateFps: longVideoSampleRateFps
+        sampleRateFps: effectiveSampleRate,
+        maxFrames: maxFrames
+      )
+      requiredNsfwFrames = resolveRequiredNsfwFrames(
+        durationSeconds: durationSeconds,
+        totalFrames: max(1, frameTimes.count),
+        enabled: videoEarlyStopEnabled,
+        baseFrames: videoEarlyStopBaseNsfwFrames,
+        mediumBonus: videoEarlyStopMediumBonusFrames,
+        longBonus: videoEarlyStopLongBonusFrames,
+        mediumThresholdMinutes: mediumVideoMinutesThreshold,
+        longThresholdMinutes: longVideoMinutesThreshold,
+        veryLongThresholdMinutes: videoEarlyStopVeryLongMinutesThreshold,
+        veryLongBonus: videoEarlyStopVeryLongBonusFrames
       )
     } else {
+      // Some cloud/mutated videos fail direct duration probing.
+      // Fallback to at least one frame at t=0 instead of failing the asset.
       effectiveSampleRate = max(0.2, min(30, Double(sampleRateFps)))
+      frameTimes = [0.0]
+      requiredNsfwFrames = 1
     }
-    let frameTimes = buildVideoFrameTimes(
-      durationSeconds: durationSeconds,
-      sampleRateFps: effectiveSampleRate,
-      maxFrames: maxFrames
-    )
     let totalFrames = max(1, frameTimes.count)
-    let requiredNsfwFrames = resolveRequiredNsfwFrames(
-      durationSeconds: durationSeconds,
-      totalFrames: totalFrames,
-      enabled: videoEarlyStopEnabled,
-      baseFrames: videoEarlyStopBaseNsfwFrames,
-      mediumBonus: videoEarlyStopMediumBonusFrames,
-      longBonus: videoEarlyStopLongBonusFrames,
-      mediumThresholdMinutes: mediumVideoMinutesThreshold,
-      longThresholdMinutes: longVideoMinutesThreshold,
-      veryLongThresholdMinutes: videoEarlyStopVeryLongMinutesThreshold,
-      veryLongBonus: videoEarlyStopVeryLongBonusFrames
-    )
     var processedFrames = 0
     onProgress(
       buildProgressPayload(
@@ -1741,6 +1817,7 @@ private final class IOSNsfwScanner {
     let successCount: Int
     let errorCount: Int
     let flaggedCount: Int
+    let deferredRetryItems: [GalleryAssetItem]
   }
 
   func scanGallery(
@@ -1794,8 +1871,11 @@ private final class IOSNsfwScanner {
     let videoEarlyStopVeryLongBonusFrames =
       (settings["videoEarlyStopVeryLongBonusFrames"] as? NSNumber)?.intValue ?? 3
     let continueOnError = (settings["continueOnError"] as? Bool) ?? true
+    let preferThumbnailForImages = (settings["preferThumbnailForImages"] as? Bool) ?? true
     let scanBatchSize = ((settings["scanChunkSize"] as? NSNumber)?.intValue ?? 100).clamped(to: 50...200)
     let thumbnailSize = ((settings["thumbnailSize"] as? NSNumber)?.intValue ?? 224).clamped(to: 128...512)
+    let retryPasses = ((settings["retryPasses"] as? NSNumber)?.intValue ?? 2).clamped(to: 1...3)
+    let retryDelayMs = ((settings["retryDelayMs"] as? NSNumber)?.intValue ?? 1400).clamped(to: 0...10000)
     let loadProgressEvery = ((settings["loadProgressEvery"] as? NSNumber)?.intValue ?? 100).clamped(to: 20...500)
     let maxItemsRaw = (settings["maxItems"] as? NSNumber)?.intValue
     let maxItems = (maxItemsRaw ?? 0) > 0 ? maxItemsRaw! : nil
@@ -1892,50 +1972,16 @@ private final class IOSNsfwScanner {
     var errorTotal = 0
     var flaggedTotal = 0
     var page = 0
+    var pendingRetryAssets: [GalleryAssetItem] = []
 
-    func flushBatch() throws {
-      if pendingBatch.isEmpty {
-        return
-      }
-      let batch = pendingBatch
-      pendingBatch.removeAll(keepingCapacity: true)
-      let outcome = try processGalleryBatch(
-        batch: batch,
-        maxConcurrency: maxConcurrency,
-        imageThreshold: imageThreshold,
-        videoThreshold: videoThreshold,
-        videoSampleRateFps: videoSampleRateFps,
-        videoMaxFrames: videoMaxFrames,
-        dynamicVideoSampleRate: dynamicVideoSampleRate,
-        shortVideoMinSampleRateFps: shortVideoMinSampleRateFps,
-        shortVideoMaxSampleRateFps: shortVideoMaxSampleRateFps,
-        mediumVideoMinutesThreshold: mediumVideoMinutesThreshold,
-        longVideoMinutesThreshold: longVideoMinutesThreshold,
-        mediumVideoSampleRateFps: mediumVideoSampleRateFps,
-        longVideoSampleRateFps: longVideoSampleRateFps,
-        videoEarlyStopEnabled: videoEarlyStopEnabled,
-        videoEarlyStopBaseNsfwFrames: videoEarlyStopBaseNsfwFrames,
-        videoEarlyStopMediumBonusFrames: videoEarlyStopMediumBonusFrames,
-        videoEarlyStopLongBonusFrames: videoEarlyStopLongBonusFrames,
-        videoEarlyStopVeryLongMinutesThreshold: videoEarlyStopVeryLongMinutesThreshold,
-        videoEarlyStopVeryLongBonusFrames: videoEarlyStopVeryLongBonusFrames,
-        continueOnError: continueOnError,
-        thumbnailSize: thumbnailSize,
-        scanId: scanId,
-        isCancelled: isCancelled,
-        includeCleanResults: includeCleanResults,
-        debugLogging: debugLogging
-      )
-      if debugLogging {
-        NSLog(
-          "[flutter_nsfw_scaner][gallery:\(scanId)] batch processed=\(outcome.processed) success=\(outcome.successCount) errors=\(outcome.errorCount) flagged=\(outcome.flaggedCount)"
-        )
-      }
-
+    func applyOutcome(_ outcome: GalleryBatchOutcome) {
       processedTotal += outcome.processed
       successTotal += outcome.successCount
       errorTotal += outcome.errorCount
       flaggedTotal += outcome.flaggedCount
+      if !outcome.deferredRetryItems.isEmpty {
+        pendingRetryAssets.append(contentsOf: outcome.deferredRetryItems)
+      }
       if finalItems.count < 2000 && !outcome.streamedItems.isEmpty {
         let remaining = 2000 - finalItems.count
         finalItems.append(contentsOf: outcome.streamedItems.prefix(remaining))
@@ -1967,6 +2013,49 @@ private final class IOSNsfwScanner {
           mediaType: nil
         )
       )
+    }
+
+    func flushBatch(deferRetryableFailures: Bool = true) throws {
+      if pendingBatch.isEmpty {
+        return
+      }
+      let batch = pendingBatch
+      pendingBatch.removeAll(keepingCapacity: true)
+      let outcome = try processGalleryBatch(
+        batch: batch,
+        maxConcurrency: maxConcurrency,
+        imageThreshold: imageThreshold,
+        videoThreshold: videoThreshold,
+        videoSampleRateFps: videoSampleRateFps,
+        videoMaxFrames: videoMaxFrames,
+        dynamicVideoSampleRate: dynamicVideoSampleRate,
+        shortVideoMinSampleRateFps: shortVideoMinSampleRateFps,
+        shortVideoMaxSampleRateFps: shortVideoMaxSampleRateFps,
+        mediumVideoMinutesThreshold: mediumVideoMinutesThreshold,
+        longVideoMinutesThreshold: longVideoMinutesThreshold,
+        mediumVideoSampleRateFps: mediumVideoSampleRateFps,
+        longVideoSampleRateFps: longVideoSampleRateFps,
+        videoEarlyStopEnabled: videoEarlyStopEnabled,
+        videoEarlyStopBaseNsfwFrames: videoEarlyStopBaseNsfwFrames,
+        videoEarlyStopMediumBonusFrames: videoEarlyStopMediumBonusFrames,
+        videoEarlyStopLongBonusFrames: videoEarlyStopLongBonusFrames,
+        videoEarlyStopVeryLongMinutesThreshold: videoEarlyStopVeryLongMinutesThreshold,
+        videoEarlyStopVeryLongBonusFrames: videoEarlyStopVeryLongBonusFrames,
+        continueOnError: continueOnError,
+        preferThumbnailForImages: preferThumbnailForImages,
+        thumbnailSize: thumbnailSize,
+        scanId: scanId,
+        isCancelled: isCancelled,
+        includeCleanResults: includeCleanResults,
+        debugLogging: debugLogging,
+        deferRetryableFailures: deferRetryableFailures
+      )
+      if debugLogging {
+        NSLog(
+          "[flutter_nsfw_scaner][gallery:\(scanId)] batch processed=\(outcome.processed) success=\(outcome.successCount) errors=\(outcome.errorCount) flagged=\(outcome.flaggedCount) deferredRetries=\(outcome.deferredRetryItems.count)"
+        )
+      }
+      applyOutcome(outcome)
     }
 
     var index = 0
@@ -2019,6 +2108,75 @@ private final class IOSNsfwScanner {
     }
 
     try flushBatch()
+    if !pendingRetryAssets.isEmpty {
+      if debugLogging {
+        NSLog(
+          "[flutter_nsfw_scaner][gallery:\(scanId)] retry phase started deferredAssets=\(pendingRetryAssets.count) passes=\(retryPasses) delayMs=\(retryDelayMs)"
+        )
+      }
+      var retryQueue = pendingRetryAssets
+      pendingRetryAssets.removeAll(keepingCapacity: true)
+      var pass = 1
+      while !retryQueue.isEmpty && pass <= retryPasses {
+        if isCancelled() {
+          throw ScannerError.cancelled("Scan cancelled")
+        }
+        if retryDelayMs > 0 {
+          Thread.sleep(forTimeInterval: Double(retryDelayMs) / 1000.0)
+        }
+        var nextRetryQueue: [GalleryAssetItem] = []
+        var retryCursor = 0
+        while retryCursor < retryQueue.count {
+          if isCancelled() {
+            throw ScannerError.cancelled("Scan cancelled")
+          }
+          let end = min(retryCursor + scanBatchSize, retryQueue.count)
+          let retryBatch = Array(retryQueue[retryCursor..<end])
+          let allowDeferAgain = pass < retryPasses
+          let outcome = try processGalleryBatch(
+            batch: retryBatch,
+            maxConcurrency: maxConcurrency,
+            imageThreshold: imageThreshold,
+            videoThreshold: videoThreshold,
+            videoSampleRateFps: videoSampleRateFps,
+            videoMaxFrames: videoMaxFrames,
+            dynamicVideoSampleRate: dynamicVideoSampleRate,
+            shortVideoMinSampleRateFps: shortVideoMinSampleRateFps,
+            shortVideoMaxSampleRateFps: shortVideoMaxSampleRateFps,
+            mediumVideoMinutesThreshold: mediumVideoMinutesThreshold,
+            longVideoMinutesThreshold: longVideoMinutesThreshold,
+            mediumVideoSampleRateFps: mediumVideoSampleRateFps,
+            longVideoSampleRateFps: longVideoSampleRateFps,
+            videoEarlyStopEnabled: videoEarlyStopEnabled,
+            videoEarlyStopBaseNsfwFrames: videoEarlyStopBaseNsfwFrames,
+            videoEarlyStopMediumBonusFrames: videoEarlyStopMediumBonusFrames,
+            videoEarlyStopLongBonusFrames: videoEarlyStopLongBonusFrames,
+            videoEarlyStopVeryLongMinutesThreshold: videoEarlyStopVeryLongMinutesThreshold,
+            videoEarlyStopVeryLongBonusFrames: videoEarlyStopVeryLongBonusFrames,
+            continueOnError: continueOnError,
+            preferThumbnailForImages: preferThumbnailForImages,
+            thumbnailSize: thumbnailSize,
+            scanId: "\(scanId)_retry_\(pass)",
+            isCancelled: isCancelled,
+            includeCleanResults: includeCleanResults,
+            debugLogging: debugLogging,
+            deferRetryableFailures: allowDeferAgain
+          )
+          if !outcome.deferredRetryItems.isEmpty {
+            nextRetryQueue.append(contentsOf: outcome.deferredRetryItems)
+          }
+          if debugLogging {
+            NSLog(
+              "[flutter_nsfw_scaner][gallery:\(scanId)] retry pass=\(pass) batch processed=\(outcome.processed) success=\(outcome.successCount) errors=\(outcome.errorCount) flagged=\(outcome.flaggedCount) deferred=\(outcome.deferredRetryItems.count)"
+            )
+          }
+          applyOutcome(outcome)
+          retryCursor = end
+        }
+        retryQueue = nextRetryQueue
+        pass += 1
+      }
+    }
     onEvent(
       buildGalleryLoadPayload(
         scanId: scanId,
@@ -2078,11 +2236,13 @@ private final class IOSNsfwScanner {
     videoEarlyStopVeryLongMinutesThreshold: Int,
     videoEarlyStopVeryLongBonusFrames: Int,
     continueOnError: Bool,
+    preferThumbnailForImages: Bool,
     thumbnailSize: Int,
     scanId: String,
     isCancelled: @escaping () -> Bool,
     includeCleanResults: Bool,
-    debugLogging: Bool
+    debugLogging: Bool,
+    deferRetryableFailures: Bool
   ) throws -> GalleryBatchOutcome {
     if batch.isEmpty {
       return GalleryBatchOutcome(
@@ -2091,7 +2251,8 @@ private final class IOSNsfwScanner {
         processed: 0,
         successCount: 0,
         errorCount: 0,
-        flaggedCount: 0
+        flaggedCount: 0,
+        deferredRetryItems: []
       )
     }
     if isCancelled() {
@@ -2111,9 +2272,11 @@ private final class IOSNsfwScanner {
     let poolLock = NSLock()
     let resultLock = NSLock()
     let fatalLock = NSLock()
+    let retryLock = NSLock()
 
     var firstFatalError: Error?
     var orderedResults = Array(repeating: [String: Any](), count: batch.count)
+    var deferredRetryItems: [GalleryAssetItem] = []
 
     let operationQueue = OperationQueue()
     operationQueue.qualityOfService = .userInitiated
@@ -2143,40 +2306,65 @@ private final class IOSNsfwScanner {
 
             let payload: [String: Any]
             if item.type == "video" {
-              guard let videoPath = self.resolveVideoPath(for: item.asset) else {
-                throw ScannerError.invalidArgument("No local file path available for video asset \(item.assetId)")
+              let identityPath = "ph://\(item.assetId)"
+              do {
+                let videoPath: String
+                if let resolvedVideoPath = self.resolveVideoPath(for: item.asset) {
+                  videoPath = resolvedVideoPath
+                } else {
+                  // Fallback for cloud-backed videos where AVAsset URL is not immediately available.
+                  videoPath = try self.resolveVideoAssetPath(asset: item.asset)
+                }
+                let videoResult = try self.scanVideo(
+                  scanId: "\(scanId)_\(item.assetId)",
+                  videoPath: videoPath,
+                  threshold: videoThreshold,
+                  sampleRateFps: videoSampleRateFps,
+                  maxFrames: videoMaxFrames,
+                  dynamicSampleRate: dynamicVideoSampleRate,
+                  shortVideoMinSampleRateFps: shortVideoMinSampleRateFps,
+                  shortVideoMaxSampleRateFps: shortVideoMaxSampleRateFps,
+                  mediumVideoMinutesThreshold: mediumVideoMinutesThreshold,
+                  longVideoMinutesThreshold: longVideoMinutesThreshold,
+                  mediumVideoSampleRateFps: mediumVideoSampleRateFps,
+                  longVideoSampleRateFps: longVideoSampleRateFps,
+                  videoEarlyStopEnabled: videoEarlyStopEnabled,
+                  videoEarlyStopBaseNsfwFrames: videoEarlyStopBaseNsfwFrames,
+                  videoEarlyStopMediumBonusFrames: videoEarlyStopMediumBonusFrames,
+                  videoEarlyStopLongBonusFrames: videoEarlyStopLongBonusFrames,
+                  videoEarlyStopVeryLongMinutesThreshold: videoEarlyStopVeryLongMinutesThreshold,
+                  videoEarlyStopVeryLongBonusFrames: videoEarlyStopVeryLongBonusFrames,
+                  onProgress: { _ in },
+                  isCancelled: isCancelled
+                )
+                payload = self.buildGalleryItemPayload(
+                  assetId: item.assetId,
+                  uri: identityPath,
+                  path: videoPath,
+                  type: item.type,
+                  imageResult: nil,
+                  videoResult: videoResult,
+                  error: nil
+                )
+              } catch {
+                guard let videoFallbackResult = try? self.scanVideoWithThumbnailFallback(
+                  asset: item.asset,
+                  assetId: item.assetId,
+                  threshold: videoThreshold,
+                  thumbnailSize: thumbnailSize
+                ) else {
+                  throw error
+                }
+                payload = self.buildGalleryItemPayload(
+                  assetId: item.assetId,
+                  uri: identityPath,
+                  path: identityPath,
+                  type: item.type,
+                  imageResult: nil,
+                  videoResult: videoFallbackResult,
+                  error: nil
+                )
               }
-              let videoResult = try self.scanVideo(
-                scanId: "\(scanId)_\(item.assetId)",
-                videoPath: videoPath,
-                threshold: videoThreshold,
-                sampleRateFps: videoSampleRateFps,
-                maxFrames: videoMaxFrames,
-                dynamicSampleRate: dynamicVideoSampleRate,
-                shortVideoMinSampleRateFps: shortVideoMinSampleRateFps,
-                shortVideoMaxSampleRateFps: shortVideoMaxSampleRateFps,
-                mediumVideoMinutesThreshold: mediumVideoMinutesThreshold,
-                longVideoMinutesThreshold: longVideoMinutesThreshold,
-                mediumVideoSampleRateFps: mediumVideoSampleRateFps,
-                longVideoSampleRateFps: longVideoSampleRateFps,
-                videoEarlyStopEnabled: videoEarlyStopEnabled,
-                videoEarlyStopBaseNsfwFrames: videoEarlyStopBaseNsfwFrames,
-                videoEarlyStopMediumBonusFrames: videoEarlyStopMediumBonusFrames,
-                videoEarlyStopLongBonusFrames: videoEarlyStopLongBonusFrames,
-                videoEarlyStopVeryLongMinutesThreshold: videoEarlyStopVeryLongMinutesThreshold,
-                videoEarlyStopVeryLongBonusFrames: videoEarlyStopVeryLongBonusFrames,
-                onProgress: { _ in },
-                isCancelled: isCancelled
-              )
-              payload = self.buildGalleryItemPayload(
-                assetId: item.assetId,
-                uri: "ph://\(item.assetId)",
-                path: videoPath,
-                type: item.type,
-                imageResult: nil,
-                videoResult: videoResult,
-                error: nil
-              )
             } else {
               var borrowedInterpreter: Interpreter?
               poolLock.lock()
@@ -2195,22 +2383,60 @@ private final class IOSNsfwScanner {
                 poolLock.unlock()
               }
 
-              let image = try self.requestThumbnailImage(
-                asset: item.asset,
-                manager: imageManager,
-                thumbnailSize: thumbnailSize
-              )
               let identityPath = "ph://\(item.assetId)"
-              let imageResult = try self.runSingleScan(
-                interpreter: interpreter,
-                cgImage: image,
-                frameIdentity: identityPath,
-                threshold: imageThreshold
-              )
+              let imageResult: [String: Any]
+              var resolvedPathForPayload = identityPath
+              if preferThumbnailForImages {
+                do {
+                  let image = try self.requestThumbnailImage(
+                    asset: item.asset,
+                    manager: imageManager,
+                    thumbnailSize: thumbnailSize
+                  )
+                  imageResult = try self.runSingleScan(
+                    interpreter: interpreter,
+                    cgImage: image,
+                    frameIdentity: identityPath,
+                    threshold: imageThreshold
+                  )
+                } catch {
+                  // If thumbnail extraction fails, try full asset materialization to local cache.
+                  let localImagePath = try self.resolveImageAssetPath(asset: item.asset)
+                  imageResult = try self.runSingleScan(
+                    interpreter: interpreter,
+                    imagePath: localImagePath,
+                    threshold: imageThreshold
+                  )
+                  resolvedPathForPayload = localImagePath
+                }
+              } else {
+                do {
+                  let localImagePath = try self.resolveImageAssetPath(asset: item.asset)
+                  imageResult = try self.runSingleScan(
+                    interpreter: interpreter,
+                    imagePath: localImagePath,
+                    threshold: imageThreshold
+                  )
+                  resolvedPathForPayload = localImagePath
+                } catch {
+                  // Fallback to thumbnail scanning if full asset materialization fails.
+                  let image = try self.requestThumbnailImage(
+                    asset: item.asset,
+                    manager: imageManager,
+                    thumbnailSize: thumbnailSize
+                  )
+                  imageResult = try self.runSingleScan(
+                    interpreter: interpreter,
+                    cgImage: image,
+                    frameIdentity: identityPath,
+                    threshold: imageThreshold
+                  )
+                }
+              }
               payload = self.buildGalleryItemPayload(
                 assetId: item.assetId,
                 uri: identityPath,
-                path: identityPath,
+                path: resolvedPathForPayload,
                 type: item.type,
                 imageResult: imageResult,
                 videoResult: nil,
@@ -2236,6 +2462,12 @@ private final class IOSNsfwScanner {
             }
             if debugLogging {
               NSLog("[flutter_nsfw_scaner][gallery:\(scanId)] item=\(item.type) asset=\(item.assetId) error=\((error as NSError).localizedDescription)")
+            }
+            if deferRetryableFailures && self.isRetryableGalleryAssetError(error) {
+              retryLock.lock()
+              deferredRetryItems.append(item)
+              retryLock.unlock()
+              return
             }
             let payload = self.buildGalleryItemPayload(
               assetId: item.assetId,
@@ -2297,8 +2529,27 @@ private final class IOSNsfwScanner {
       processed: nonEmptyResults.count,
       successCount: successCount,
       errorCount: errorCount,
-      flaggedCount: flaggedCount
+      flaggedCount: flaggedCount,
+      deferredRetryItems: deferredRetryItems
     )
+  }
+
+  private func isRetryableGalleryAssetError(_ error: Error) -> Bool {
+    let nsError = error as NSError
+    if nsError.domain == "PHPhotosErrorDomain" {
+      return true
+    }
+    let message = nsError.localizedDescription.lowercased()
+    if message.contains("icloud") ||
+      message.contains("cloud") ||
+      message.contains("network") ||
+      message.contains("tempor") ||
+      message.contains("not available") ||
+      message.contains("unable to fetch") ||
+      message.contains("resource") {
+      return true
+    }
+    return false
   }
 
   private func ensurePhotoAccess() throws {
@@ -2413,12 +2664,19 @@ private final class IOSNsfwScanner {
     manager: PHCachingImageManager,
     thumbnailSize: Int
   ) throws -> CGImage {
-    if let imageData = try requestImageData(for: asset),
-       let dataThumbnail = IOSNsfwScanner.decodeThumbnailFromImageData(
-         imageData,
-         targetMaxPixelSize: thumbnailSize
-       ) {
-      return dataThumbnail
+    var dataPathError: Error?
+    do {
+      if let imageData = try requestImageData(for: asset),
+         let dataThumbnail = IOSNsfwScanner.decodeThumbnailFromImageData(
+           imageData,
+           targetMaxPixelSize: thumbnailSize
+         ) {
+        return dataThumbnail
+      }
+    } catch {
+      // Some iCloud/restricted assets fail on direct data access.
+      // Keep going and try UIImage fallback before giving up.
+      dataPathError = error
     }
 
     // Fallback to UIImage request when direct data retrieval is unavailable.
@@ -2454,6 +2712,11 @@ private final class IOSNsfwScanner {
     semaphore.wait()
 
     if let requestError {
+      if let dataPathError {
+        throw ScannerError.invalidArgument(
+          "Unable to fetch thumbnail for asset \(asset.localIdentifier): data path failed (\((dataPathError as NSError).localizedDescription)); image request failed (\((requestError as NSError).localizedDescription))"
+        )
+      }
       throw requestError
     }
     if let cgImage = requestedImage?.cgImage {
@@ -2469,7 +2732,14 @@ private final class IOSNsfwScanner {
         return cgImage
       }
     }
-    throw ScannerError.invalidArgument("Unable to fetch thumbnail for asset \(asset.localIdentifier)")
+    if let dataPathError {
+      throw ScannerError.invalidArgument(
+        "Unable to fetch thumbnail for asset \(asset.localIdentifier): \((dataPathError as NSError).localizedDescription)"
+      )
+    }
+    throw ScannerError.invalidArgument(
+      "Unable to fetch thumbnail for asset \(asset.localIdentifier)"
+    )
   }
 
   private func requestUIImage(
@@ -2544,6 +2814,63 @@ private final class IOSNsfwScanner {
       throw requestError
     }
     return resolvedData
+  }
+
+  private func resolveImageAssetPath(asset: PHAsset) throws -> String {
+    guard let data = try requestImageData(for: asset), !data.isEmpty else {
+      throw ScannerError.invalidArgument(
+        "Unable to read image data for asset \(asset.localIdentifier)"
+      )
+    }
+    let outDir = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "asset_cache",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+      at: outDir,
+      withIntermediateDirectories: true
+    )
+    let out = outDir.appendingPathComponent("asset_\(UUID().uuidString).jpg")
+    try data.write(to: out, options: .atomic)
+    return out.path
+  }
+
+  private func resolveVideoAssetPath(asset: PHAsset) throws -> String {
+    let resources = PHAssetResource.assetResources(for: asset)
+    guard let resource = resources.first(where: { $0.type == .video || $0.type == .fullSizeVideo }) ?? resources.first else {
+      throw ScannerError.invalidArgument(
+        "Unable to read video resource for asset \(asset.localIdentifier)"
+      )
+    }
+    let outDir = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "asset_cache",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+      at: outDir,
+      withIntermediateDirectories: true
+    )
+    let ext = (resource.originalFilename as NSString).pathExtension
+    let out = outDir.appendingPathComponent(
+      "asset_\(UUID().uuidString).\(ext.isEmpty ? "mov" : ext)"
+    )
+    let semaphore = DispatchSemaphore(value: 0)
+    var writeError: Error?
+    let requestOptions = PHAssetResourceRequestOptions()
+    requestOptions.isNetworkAccessAllowed = true
+    PHAssetResourceManager.default().writeData(
+      for: resource,
+      toFile: out,
+      options: requestOptions
+    ) { error in
+      writeError = error
+      semaphore.signal()
+    }
+    semaphore.wait()
+    if let writeError {
+      throw writeError
+    }
+    return out.path
   }
 
   private func resolveVideoPath(for asset: PHAsset) -> String? {
@@ -2649,6 +2976,94 @@ private final class IOSNsfwScanner {
       "successCount": successCount,
       "errorCount": errorCount,
       "flaggedCount": flaggedCount,
+    ]
+  }
+
+  private func resolveVideoDurationSeconds(asset: AVURLAsset) -> Double? {
+    let directDuration = CMTimeGetSeconds(asset.duration)
+    if directDuration.isFinite && directDuration > 0 {
+      return directDuration
+    }
+
+    let keys = ["duration", "tracks"]
+    let semaphore = DispatchSemaphore(value: 0)
+    asset.loadValuesAsynchronously(forKeys: keys) {
+      semaphore.signal()
+    }
+    semaphore.wait()
+
+    for key in keys {
+      var keyError: NSError?
+      let status = asset.statusOfValue(forKey: key, error: &keyError)
+      if status == .failed || status == .cancelled {
+        continue
+      }
+    }
+
+    let loadedDuration = CMTimeGetSeconds(asset.duration)
+    if loadedDuration.isFinite && loadedDuration > 0 {
+      return loadedDuration
+    }
+
+    if let videoTrack = asset.tracks(withMediaType: .video).first {
+      let trackDuration = CMTimeGetSeconds(videoTrack.timeRange.duration)
+      if trackDuration.isFinite && trackDuration > 0 {
+        return trackDuration
+      }
+    }
+
+    return nil
+  }
+
+  private func scanVideoWithThumbnailFallback(
+    asset: PHAsset,
+    assetId: String,
+    threshold: Float,
+    thumbnailSize: Int
+  ) throws -> [String: Any] {
+    let manager = PHCachingImageManager()
+    let image = try requestThumbnailImage(
+      asset: asset,
+      manager: manager,
+      thumbnailSize: thumbnailSize
+    )
+    let interpreter = try IOSNsfwScanner.createInterpreter(modelData: modelData, numThreads: numThreads)
+    try interpreter.allocateTensors()
+    let frameIdentity = "ph://\(assetId)#thumb"
+    let frameResult = try runSingleScan(
+      interpreter: interpreter,
+      cgImage: image,
+      frameIdentity: frameIdentity,
+      threshold: threshold
+    )
+
+    let nsfwScore = frameResult["nsfwScore"] as? Double ?? 0
+    let safeScore = frameResult["safeScore"] as? Double ?? 0
+    let isNsfw = frameResult["isNsfw"] as? Bool ?? false
+    let topLabel = frameResult["topLabel"] as? String ?? ""
+    let topScore = frameResult["topScore"] as? Double ?? 0
+    let scores = frameResult["scores"] as? [String: Double] ?? [:]
+
+    return [
+      "videoPath": "ph://\(assetId)",
+      "sampleRateFps": 0.0,
+      "sampledFrames": 1,
+      "flaggedFrames": isNsfw ? 1 : 0,
+      "flaggedRatio": isNsfw ? 1.0 : 0.0,
+      "maxNsfwScore": nsfwScore,
+      "isNsfw": isNsfw,
+      "requiredNsfwFrames": 1,
+      "fallbackMode": "thumbnail",
+      "frames": [[
+        "timestampMs": 0.0,
+        "nsfwScore": nsfwScore,
+        "safeScore": safeScore,
+        "isNsfw": isNsfw,
+        "topLabel": topLabel,
+        "topScore": topScore,
+        "scores": scores,
+        "error": NSNull(),
+      ]],
     ]
   }
 

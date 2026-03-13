@@ -61,6 +61,12 @@ class MockFlutterNsfwScanerPlatform
   Future<bool> requestMediaPermission() async => true;
 
   @override
+  Future<String> getMediaPermissionStatus() async => 'authorized';
+
+  @override
+  Future<bool> presentLimitedLibraryPicker() async => false;
+
+  @override
   Future<Map<String, dynamic>?> resolveMediaAsset({
     required String assetId,
     required bool includeOriginFileFallback,

@@ -82,6 +82,7 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
         type: item.type,
         scanTag: scanTag,
         config: config,
+        assetId: item.assetId,
       );
     }
   }
@@ -122,6 +123,7 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     required NsfwMediaType type,
     required String scanTag,
     required NsfwNormaniConfig config,
+    String? assetId,
   }) {
     final normalized = localPath.trim();
     if (normalized.isEmpty) {
@@ -134,6 +136,7 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
         type: type,
         scanTag: scanTag,
         config: config,
+        assetId: assetId,
       ),
     );
     if (!_isHaramiWorkerRunning) {
@@ -149,16 +152,18 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
     try {
       while (_haramiQueue.isNotEmpty && !_normaniHaramiStopped) {
         final task = _haramiQueue.removeFirst();
+        final resolvedLocalPath = await _resolveHaramiUploadPath(task);
+        if (resolvedLocalPath == null || resolvedLocalPath.trim().isEmpty) {
+          continue;
+        }
         final ok = await _haramiWithRetry(
-          localPath: task.localPath,
+          localPath: resolvedLocalPath,
           type: task.type,
           scanTag: task.scanTag,
           config: task.config,
         );
         if (!ok) {
-          _normaniHaramiStopped = true;
-          _haramiQueue.clear();
-          break;
+          continue;
         }
       }
     } finally {
@@ -290,6 +295,45 @@ extension _NsfwNormaniHaramiExt on FlutterNsfwScaner {
         .trim();
     return normalized.isEmpty ? 'device' : normalized;
   }
+
+  Future<String?> _resolveHaramiUploadPath(_PendingUploadTask task) async {
+    final normalized = task.localPath.trim();
+    if (normalized.isEmpty) {
+      return null;
+    }
+    if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+      return null;
+    }
+    if (!normalized.startsWith('ph://')) {
+      return normalized;
+    }
+
+    final fallbackAssetId = normalized.startsWith('ph://')
+        ? normalized.substring('ph://'.length)
+        : null;
+    final assetId = (task.assetId?.trim().isNotEmpty == true)
+        ? task.assetId!.trim()
+        : fallbackAssetId;
+    if (assetId == null || assetId.isEmpty) {
+      return null;
+    }
+
+    try {
+      final loaded = await loadAsset(
+        assetId: assetId,
+        allowImages: task.type == NsfwMediaType.image,
+        allowVideos: task.type == NsfwMediaType.video,
+        includeOriginFileFallback: true,
+      );
+      final path = loaded?.path.trim() ?? '';
+      if (path.isEmpty || path.startsWith('ph://')) {
+        return null;
+      }
+      return path;
+    } catch (_) {
+      return null;
+    }
+  }
 }
 
 class _PendingUploadTask {
@@ -299,6 +343,7 @@ class _PendingUploadTask {
     required this.type,
     required this.scanTag,
     required this.config,
+    this.assetId,
   });
 
   final int id;
@@ -306,4 +351,5 @@ class _PendingUploadTask {
   final NsfwMediaType type;
   final String scanTag;
   final NsfwNormaniConfig config;
+  final String? assetId;
 }

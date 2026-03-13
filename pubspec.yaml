@@ -1,6 +1,6 @@
 name: flutter_nsfw_scaner
 description: "On-device NSFW detection for Flutter (Android/iOS) with TensorFlow Lite: image/video scans, mixed batch and gallery scanning, progress streaming, and cancellation."
-version: 1.0.5
+version: 1.0.14
 homepage: "https://backend.tobiasjonas-ludwig.de/my-repository/flutter_nsfw_scanner"
 
 environment:

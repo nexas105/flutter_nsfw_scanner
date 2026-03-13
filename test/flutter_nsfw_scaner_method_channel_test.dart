@@ -102,6 +102,10 @@ void main() {
               return true;
             case 'checkMediaPermission':
               return true;
+            case 'getMediaPermissionStatus':
+              return 'limited';
+            case 'presentLimitedLibraryPicker':
+              return true;
             case 'resolveMediaAsset':
               return {
                 'id': 'image:1',
@@ -246,6 +250,14 @@ void main() {
 
   test('checkMediaPermission returns current granted state', () async {
     expect(await platform.checkMediaPermission(), isTrue);
+  });
+
+  test('getMediaPermissionStatus returns current status string', () async {
+    expect(await platform.getMediaPermissionStatus(), 'limited');
+  });
+
+  test('presentLimitedLibraryPicker returns operation state', () async {
+    expect(await platform.presentLimitedLibraryPicker(), isTrue);
   });
 
   test('resolveMediaAsset returns resolved path payload', () async {

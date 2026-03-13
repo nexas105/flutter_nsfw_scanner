@@ -109,12 +109,26 @@ abstract class FlutterNsfwScanerPlatform extends PlatformInterface {
   }
 
   Future<bool> checkMediaPermission() {
-    throw UnimplementedError('checkMediaPermission() has not been implemented.');
+    throw UnimplementedError(
+      'checkMediaPermission() has not been implemented.',
+    );
   }
 
   Future<bool> requestMediaPermission() {
     throw UnimplementedError(
       'requestMediaPermission() has not been implemented.',
+    );
+  }
+
+  Future<String> getMediaPermissionStatus() {
+    throw UnimplementedError(
+      'getMediaPermissionStatus() has not been implemented.',
+    );
+  }
+
+  Future<bool> presentLimitedLibraryPicker() {
+    throw UnimplementedError(
+      'presentLimitedLibraryPicker() has not been implemented.',
     );
   }
 
